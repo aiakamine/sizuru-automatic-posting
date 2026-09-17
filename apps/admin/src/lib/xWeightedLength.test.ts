@@ -55,11 +55,14 @@ describe("xWeightedLength", () => {
   });
 
   it("stays fast for very long input (10k characters)", () => {
+    // これはベンチマークではなく、正規表現の破滅的バックトラッキング等による
+    // 指数的な劣化が起きていないことを確認するサニティチェック。
+    // CI/共有マシンの負荷でも安定して通るよう、閾値は十分に余裕を持たせている。
     const longText = "あ".repeat(10_000);
     const start = performance.now();
     xWeightedLength(longText);
     const elapsed = performance.now() - start;
-    expect(elapsed).toBeLessThan(50);
+    expect(elapsed).toBeLessThan(1000);
   });
 });
 

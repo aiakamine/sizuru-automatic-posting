@@ -15,8 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from twitter_text import parse_tweet
-
+from sizuru_post._vendor.twitter_text import parse_tweet
 from sizuru_post.domain.models import Target, VideoInfo
 
 Level = Literal["error", "warning"]

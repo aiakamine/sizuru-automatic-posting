@@ -14,13 +14,6 @@ dependencies = [
     "typer>=0.12",
     "python-dotenv>=1.0",
     "supabase>=2.6",
-    "twitter-text-parser>=3.0.0",
-    # twitter-text-parser's emoji regexp module still does `import
-    # pkg_resources` internally to load its bundled emoji-test.txt data
-    # file; pkg_resources was removed from setuptools starting with 81.0.0,
-    # so this pin is load-bearing (not just a version floor) until upstream
-    # migrates to importlib.resources.
-    "setuptools<81",
     "pyjwt[crypto]>=2.14.0",
 ]
 
@@ -43,6 +36,9 @@ dev = [
 [tool.ruff]
 line-length = 110
 target-version = "py312"
+# Vendored third-party code (see src/sizuru_post/_vendor/README.md) — not
+# ours to restyle.
+extend-exclude = ["src/sizuru_post/_vendor"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
@@ -55,17 +51,19 @@ python_version = "3.12"
 strict = true
 files = ["src"]
 plugins = ["pydantic.mypy"]
+# Vendored third-party code (see src/sizuru_post/_vendor/README.md) — not
+# ours to type-check.
+exclude = ["^src/sizuru_post/_vendor/"]
 
 [[tool.mypy.overrides]]
-module = ["boto3.*", "botocore.*", "supabase.*", "twitter_text.*"]
+module = ["boto3.*", "botocore.*", "supabase.*"]
 ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["sizuru_post._vendor.*"]
+ignore_errors = true
+follow_imports = "skip"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
-filterwarnings = [
-    # twitter-text-parser's emoji regexp module still imports pkg_resources
-    # internally (see pyproject.toml's setuptools<81 pin) — nothing we
-    # control on our side, so silence the noise rather than the real thing.
-    "ignore:pkg_resources is deprecated as an API:UserWarning",
-]

@@ -1139,15 +1139,6 @@ wheels = [
 ]
 
 [[package]]
-name = "setuptools"
-version = "80.10.2"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/76/95/faf61eb8363f26aa7e1d762267a8d602a1b26d4f3a1e758e92cb3cb8b054/setuptools-80.10.2.tar.gz", hash = "sha256:8b0e9d10c784bf7d262c4e5ec5d4ec94127ce206e8738f29a437945fbc219b70", size = 1200343, upload-time = "2026-01-25T22:38:17.252Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/94/b8/f1f62a5e3c0ad2ff1d189590bfa4c46b4f3b6e49cef6f26c6ee4e575394d/setuptools-80.10.2-py3-none-any.whl", hash = "sha256:95b30ddfb717250edb492926c92b5221f7ef3fbcc2b07579bcd4a27da21d0173", size = 1064234, upload-time = "2026-01-25T22:38:15.216Z" },
-]
-
-[[package]]
 name = "shellingham"
 version = "1.5.4"
 source = { registry = "https://pypi.org/simple" }
@@ -1176,9 +1167,7 @@ dependencies = [
     { name = "pydantic-settings" },
     { name = "pyjwt", extra = ["crypto"] },
     { name = "python-dotenv" },
-    { name = "setuptools" },
     { name = "supabase" },
-    { name = "twitter-text-parser" },
     { name = "typer" },
 ]
 
@@ -1199,9 +1188,7 @@ requires-dist = [
     { name = "pydantic-settings", specifier = ">=2" },
     { name = "pyjwt", extras = ["crypto"], specifier = ">=2.14.0" },
     { name = "python-dotenv", specifier = ">=1.0" },
-    { name = "setuptools", specifier = "<81" },
     { name = "supabase", specifier = ">=2.6" },
-    { name = "twitter-text-parser", specifier = ">=3.0.0" },
     { name = "typer", specifier = ">=0.12" },
 ]
 
@@ -1282,15 +1269,6 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/84/5d/61c2446ed26a57fa5543f9c270a731320911569202340d15341f72cdba7c/supabase_functions-2.31.0.tar.gz", hash = "sha256:4ad027b3ae3bd28b31233339f4db1da6965affd3546f655b421baf40cee2690f", size = 4683, upload-time = "2026-06-04T13:37:28.878Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/90/79/1a8162ce7d705381a4f2668c0da68e097b103c1aa701418a31da52905c7b/supabase_functions-2.31.0-py3-none-any.whl", hash = "sha256:3fdc4c4766152bfda63bdd0e286fc8a06f50e1280711fae4a1dfc9b7e9ebabc6", size = 8794, upload-time = "2026-06-04T13:37:28.022Z" },
-]
-
-[[package]]
-name = "twitter-text-parser"
-version = "3.0.0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/a6/e6/332b2a4a8e29c773274099e0fa92fb68d72cd276b0e7f960780bc7898881/twitter_text_parser-3.0.0.tar.gz", hash = "sha256:9426e4fb9393c8c1adfb36ff5d91495ff4524782e85f80748f6ae0bc1efffcda", size = 61664, upload-time = "2023-05-24T13:00:55.825Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/49/10/7ef9bd301d70cb92a35eee7d38a6378c8b327dc16bdac3089386bd5f3231/twitter_text_parser-3.0.0-py3-none-any.whl", hash = "sha256:b36bd22e147db2234e79c73b021f10c3073e8c54f22b68c31696239b6917cdd3", size = 69912, upload-time = "2023-05-24T13:00:53.902Z" },
 ]
 
 [[package]]

@@ -148,6 +148,14 @@ describe("PostDrawer cancel two-step confirmation", () => {
   beforeEach(() => {
     patchPostMock.mockReset();
     cancelPostMock.mockReset();
+    // handleConfirmCancel は送信直前に `new Date()`（実時刻）で再判定するため、
+    // 実時刻を固定しないと「今日」が NOW/due_at を追い越した時点でテストが壊れる。
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(NOW);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it("asks for confirmation before cancelling, and 戻る backs out without calling the API", async () => {
@@ -179,6 +187,14 @@ describe("PostDrawer save payload", () => {
   beforeEach(() => {
     patchPostMock.mockReset();
     cancelPostMock.mockReset();
+    // handleSave/handleConfirmCancel は送信直前に `new Date()`（実時刻）で再判定するため、
+    // 実時刻を固定しないと「今日」が NOW/due_at を追い越した時点でテストが壊れる。
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(NOW);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it("calls patchPost with only the changed fields and the access token", async () => {
@@ -343,6 +359,14 @@ describe("PostDrawer mutating state (save/cancel mutual exclusion)", () => {
   beforeEach(() => {
     patchPostMock.mockReset();
     cancelPostMock.mockReset();
+    // handleSave/handleConfirmCancel は送信直前に `new Date()`（実時刻）で再判定するため、
+    // 実時刻を固定しないと「今日」が NOW/due_at を追い越した時点でテストが壊れる。
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(NOW);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it("disables both Save and Cancel while a save is in flight, and ignores a second click", async () => {
@@ -480,5 +504,57 @@ describe("PostDrawer pending status", () => {
     expect(screen.getByText(/送信結果を確認中です/)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "変更を保存" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "予約をキャンセル" })).not.toBeInTheDocument();
+  });
+});
+
+describe("PostDrawer is clock-independent (guard test)", () => {
+  // このスイート全体が「今日の日付」に依存しないことを保証するガードテスト。
+  // 実時刻を、固定フィクスチャの日付から遠く未来（2030年）にずらしても、
+  // NOW/due_at を同じだけ未来にずらしてあれば save が成功することを確認する。
+  const FAR_FUTURE_NOW = new Date("2030-01-01T10:00:00+09:00");
+  const FAR_FUTURE_DUE_AT = "2030-01-01T20:00:00+09:00";
+
+  beforeEach(() => {
+    patchPostMock.mockReset();
+    cancelPostMock.mockReset();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(FAR_FUTURE_NOW);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("still saves successfully when the real clock is far past every fixture date, as long as now/due_at are pinned together", async () => {
+    patchPostMock.mockResolvedValue({
+      result: {
+        service: "tiktok",
+        status: "scheduled",
+        post_id: "p1",
+        buffer_post_id: "b1",
+        due_at: null,
+        error: null,
+        issues: [],
+      },
+    });
+    const onSaved = vi.fn();
+    render(
+      <PostDrawer
+        post={buildPost({ due_at: FAR_FUTURE_DUE_AT })}
+        accessToken="token-abc"
+        now={FAR_FUTURE_NOW}
+        onClose={vi.fn()}
+        onSaved={onSaved}
+        onCanceled={vi.fn()}
+      />,
+    );
+
+    const textarea = screen.getByLabelText("投稿文");
+    await userEvent.clear(textarea);
+    await userEvent.type(textarea, "未来の投稿文");
+    await userEvent.click(screen.getByRole("button", { name: "変更を保存" }));
+
+    expect(patchPostMock).toHaveBeenCalledWith("p1", { caption: "未来の投稿文" }, "token-abc");
+    await vi.waitFor(() => expect(onSaved).toHaveBeenCalled());
   });
 });
