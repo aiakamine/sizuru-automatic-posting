@@ -1,0 +1,67 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "CloudFormationStack",
+      "Effect": "Allow",
+      "Action": "cloudformation:*",
+      "Resource": [
+        "arn:aws:cloudformation:ap-northeast-1:034165313077:stack/sizuru-admin/*",
+        "arn:aws:cloudformation:ap-northeast-1:034165313077:stack/aws-sam-cli-managed-default/*",
+        "arn:aws:cloudformation:ap-northeast-1:aws:transform/Serverless-2016-10-31"
+      ]
+    },
+    {
+      "Sid": "CloudFormationReadAndChangeSets",
+      "Effect": "Allow",
+      "Action": [
+        "cloudformation:ValidateTemplate",
+        "cloudformation:GetTemplateSummary",
+        "cloudformation:ListStacks",
+        "cloudformation:DescribeStacks"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "LambdaExecutionRolesForThisStackOnly",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateRole",
+        "iam:DeleteRole",
+        "iam:GetRole",
+        "iam:TagRole",
+        "iam:UntagRole",
+        "iam:PutRolePolicy",
+        "iam:DeleteRolePolicy",
+        "iam:GetRolePolicy",
+        "iam:AttachRolePolicy",
+        "iam:DetachRolePolicy",
+        "iam:ListRolePolicies",
+        "iam:ListAttachedRolePolicies",
+        "iam:PassRole"
+      ],
+      "Resource": "arn:aws:iam::034165313077:role/sizuru-admin-*"
+    },
+    {
+      "Sid": "ServicesUsedByTheStack",
+      "Effect": "Allow",
+      "Action": [
+        "lambda:*",
+        "apigateway:*",
+        "scheduler:*",
+        "cloudfront:*",
+        "logs:*"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "SamArtifactAndFrontendBuckets",
+      "Effect": "Allow",
+      "Action": "s3:*",
+      "Resource": [
+        "arn:aws:s3:::aws-sam-cli-managed-default-*",
+        "arn:aws:s3:::sizuru-admin-*"
+      ]
+    }
+  ]
+}

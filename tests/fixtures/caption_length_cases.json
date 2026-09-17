@@ -1,0 +1,128 @@
+[
+  {
+    "description": "X: plain ASCII, weight 1 per char",
+    "service": "x",
+    "text": "hello world",
+    "expected_length": 11,
+    "limit": 280
+  },
+  {
+    "description": "X: full-width (zenkaku) Japanese, weight 2 per char",
+    "service": "x",
+    "text": "あ",
+    "expected_length": 2,
+    "limit": 280
+  },
+  {
+    "description": "X: 140 full-width chars exactly hits the 280 limit (OK)",
+    "service": "x",
+    "text": "ああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああ",
+    "expected_length": 280,
+    "limit": 280
+  },
+  {
+    "description": "X: 141 full-width chars exceeds the 280 limit (NG)",
+    "service": "x",
+    "text": "あああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああああ",
+    "expected_length": 282,
+    "limit": 280
+  },
+  {
+    "description": "X: emoji outside U+0000-U+10FF, weight 2 (one Unicode code point)",
+    "service": "x",
+    "text": "🎉",
+    "expected_length": 2,
+    "limit": 280
+  },
+  {
+    "description": "X: a URL always counts as 23 regardless of its actual length",
+    "service": "x",
+    "text": "https://example.com/very/long/path/that/would/otherwise/blow/the/budget",
+    "expected_length": 23,
+    "limit": 280
+  },
+  {
+    "description": "X: URL (23) plus surrounding ASCII text (weight 1 each)",
+    "service": "x",
+    "text": "check this out https://example.com/x nice",
+    "expected_length": 43,
+    "limit": 280
+  },
+  {
+    "description": "X: General Punctuation dash (U+2010), weight 1 (in the U+2010-U+201F range)",
+    "service": "x",
+    "text": "‐‐‐‐‐",
+    "expected_length": 5,
+    "limit": 280
+  },
+  {
+    "description": "X: mixed ASCII + full-width",
+    "service": "x",
+    "text": "abcあいう",
+    "expected_length": 9,
+    "limit": 280
+  },
+  {
+    "description": "tiktok: plain character count (no weighting), 2200 limit",
+    "service": "tiktok",
+    "text": "a plain caption with some nihongo mixed in",
+    "expected_length": 42,
+    "limit": 2200
+  },
+  {
+    "description": "tiktok: full-width chars still count as 1 each (unlike X)",
+    "service": "tiktok",
+    "text": "あああ",
+    "expected_length": 3,
+    "limit": 2200
+  },
+  {
+    "description": "instagram: plain character count (no weighting), 2200 limit",
+    "service": "instagram",
+    "text": "caption text",
+    "expected_length": 12,
+    "limit": 2200
+  },
+  {
+    "description": "instagram: emoji counts as 1 char (unlike X's weight-2 rule)",
+    "service": "instagram",
+    "text": "🎉🎉",
+    "expected_length": 2,
+    "limit": 2200
+  },
+  {
+    "description": "X: family emoji ZWJ sequence (4 emoji joined by ZWJ) weighs 2, not per-code-point",
+    "service": "x",
+    "text": "👨‍👩‍👧‍👦",
+    "limit": 280,
+    "expected_length": 2
+  },
+  {
+    "description": "X: NFD-decomposed é (e + combining acute accent) normalizes to NFC before weighing (1)",
+    "service": "x",
+    "text": "é",
+    "limit": 280,
+    "expected_length": 1
+  },
+  {
+    "description": "X: URL with trailing punctuation — the period is not absorbed into the 23-weight URL",
+    "service": "x",
+    "text": "見て https://example.com/a.",
+    "limit": 280,
+    "expected_length": 29
+  },
+  {
+    "description": "tiktok: NFD-decomposed café normalizes to NFC before counting code points (4, not 5)",
+    "service": "tiktok",
+    "text": "café",
+    "limit": 2200,
+    "expected_length": 4
+  },
+  {
+    "description": "instagram: NFD-decomposed café normalizes to NFC before counting code points (4, not 5)",
+    "service": "instagram",
+    "text": "café",
+    "limit": 2200,
+    "expected_length": 4
+  }
+]

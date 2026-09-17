@@ -1,0 +1,91 @@
+.slot {
+  border: var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  padding: var(--space-3);
+  display: grid;
+  gap: var(--space-2);
+  text-align: left;
+  width: 100%;
+}
+
+.slot:hover {
+  border-color: color-mix(in srgb, var(--primary) 45%, var(--line));
+}
+
+.slot[aria-pressed="true"] {
+  border-color: var(--primary);
+  box-shadow: inset 0 0 0 1px var(--primary);
+}
+
+.slot[data-status="canceled"] {
+  opacity: 0.6;
+}
+
+.bar {
+  height: 3px;
+  border-radius: 2px;
+}
+
+.bar[data-status="pending"] {
+  background: var(--muted);
+}
+.bar[data-status="scheduled"] {
+  background: var(--primary);
+}
+.bar[data-status="sent"] {
+  background: var(--ok);
+}
+.bar[data-status="draft"] {
+  background: var(--draft);
+}
+.bar[data-status="failed"] {
+  background: var(--err);
+}
+.bar[data-status="canceled"] {
+  background: var(--cancel);
+}
+
+.top {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  justify-content: space-between;
+}
+
+.time {
+  font-size: 13px;
+}
+
+.media {
+  display: grid;
+  grid-template-columns: 48px 1fr;
+  gap: var(--space-3);
+  align-items: start;
+}
+
+.title {
+  font-size: 12px;
+  line-height: 1.45;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  margin: 0;
+}
+
+.caption {
+  font-size: 11px;
+  color: var(--muted);
+  margin: 0;
+  line-height: 1.5;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.foot {
+  display: flex;
+  justify-content: flex-end;
+}

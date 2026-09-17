@@ -1,0 +1,31 @@
+.page {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: var(--space-6);
+}
+
+.card {
+  width: min(480px, 100%);
+  background: var(--surface);
+  border: 1px solid color-mix(in srgb, var(--err) 35%, var(--line));
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow);
+  padding: var(--space-7);
+  display: grid;
+  gap: var(--space-5);
+}
+
+.title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--err);
+}
+
+.list {
+  margin: 0;
+  padding-left: var(--space-6);
+  font-family: var(--font-mono);
+  font-size: 13px;
+}

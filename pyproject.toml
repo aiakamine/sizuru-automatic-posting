@@ -1,0 +1,71 @@
+[project]
+name = "sizuru-post"
+version = "0.1.0"
+description = "Post a local 9:16 MP4 to TikTok / Instagram Reels / X via Buffer, with Supabase-backed audit trail."
+authors = [
+    { name = "畑　来世人", email = "kiyotong0612@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "httpx>=0.27",
+    "boto3>=1.34",
+    "pydantic>=2",
+    "pydantic-settings>=2",
+    "typer>=0.12",
+    "python-dotenv>=1.0",
+    "supabase>=2.6",
+    "twitter-text-parser>=3.0.0",
+    # twitter-text-parser's emoji regexp module still does `import
+    # pkg_resources` internally to load its bundled emoji-test.txt data
+    # file; pkg_resources was removed from setuptools starting with 81.0.0,
+    # so this pin is load-bearing (not just a version floor) until upstream
+    # migrates to importlib.resources.
+    "setuptools<81",
+    "pyjwt[crypto]>=2.14.0",
+]
+
+[project.scripts]
+sizuru-post = "sizuru_post.cli:app"
+
+[build-system]
+requires = ["uv_build>=0.10.6,<0.11.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "respx>=0.21",
+    "ruff>=0.6",
+    "mypy>=1.11",
+    "boto3-stubs[s3]>=1.34",
+]
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E501"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["src"]
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = ["boto3.*", "botocore.*", "supabase.*", "twitter_text.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+filterwarnings = [
+    # twitter-text-parser's emoji regexp module still imports pkg_resources
+    # internally (see pyproject.toml's setuptools<81 pin) — nothing we
+    # control on our side, so silence the noise rather than the real thing.
+    "ignore:pkg_resources is deprecated as an API:UserWarning",
+]

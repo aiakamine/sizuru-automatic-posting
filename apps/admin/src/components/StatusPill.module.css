@@ -1,0 +1,48 @@
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: 12px;
+  font-weight: 700;
+  padding: 2px var(--space-4);
+  border-radius: var(--radius-pill);
+  white-space: nowrap;
+}
+
+.pill::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.pill[data-status="pending"] {
+  background: var(--surface-2);
+  color: var(--muted);
+}
+
+.pill[data-status="scheduled"] {
+  background: var(--primary-soft);
+  color: var(--primary-ink);
+}
+
+.pill[data-status="sent"] {
+  background: var(--ok-soft);
+  color: var(--ok);
+}
+
+.pill[data-status="draft"] {
+  background: var(--draft-soft);
+  color: var(--draft);
+}
+
+.pill[data-status="failed"] {
+  background: var(--err-soft);
+  color: var(--err);
+}
+
+.pill[data-status="canceled"] {
+  background: var(--cancel-soft);
+  color: var(--cancel);
+}

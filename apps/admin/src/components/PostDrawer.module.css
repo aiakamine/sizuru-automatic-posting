@@ -1,0 +1,171 @@
+.drawer {
+  padding: var(--space-7);
+  display: grid;
+  gap: var(--space-6);
+  align-content: start;
+  background: var(--surface);
+  border: var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow);
+}
+
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: var(--space-4);
+}
+
+.headerInfo {
+  display: flex;
+  gap: var(--space-4);
+  align-items: center;
+}
+
+.headerMeta {
+  display: flex;
+  gap: var(--space-3);
+  align-items: center;
+  margin-top: var(--space-2);
+}
+
+.headerInfo h3 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.closeButton {
+  border: 0;
+  background: none;
+  color: var(--muted);
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-sm);
+  display: grid;
+  place-items: center;
+}
+
+.closeButton:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.form {
+  display: grid;
+  gap: var(--space-5);
+}
+
+.field {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.field label {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--muted);
+}
+
+.field input,
+.field textarea {
+  border: var(--border);
+  border-radius: var(--radius-sm);
+  padding: var(--space-3) var(--space-4);
+  background: var(--surface);
+  width: 100%;
+}
+
+.field textarea {
+  min-height: 108px;
+  resize: vertical;
+  line-height: 1.6;
+}
+
+.field input:disabled,
+.field textarea:disabled {
+  background: var(--surface-2);
+  color: var(--muted);
+}
+
+.counter {
+  font-size: 12px;
+  color: var(--muted);
+  text-align: right;
+}
+
+.counter[data-over="true"] {
+  color: var(--err);
+  font-weight: 700;
+}
+
+.note {
+  font-size: 12px;
+  color: var(--muted);
+  background: var(--surface-2);
+  border-radius: var(--radius-sm);
+  padding: var(--space-3) var(--space-4);
+}
+
+.note[data-tone="err"] {
+  color: var(--err);
+  background: var(--err-soft);
+}
+
+/* 致命的ではないが対応が必要な状態（例: Buffer には反映済みだが記録に失敗）。
+   design.md に専用の警告色は無いため、err 系トークンを枠線のみに弱めて区別する。 */
+.note[data-tone="warn"] {
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--err);
+}
+
+.confirm {
+  border: 1px solid color-mix(in srgb, var(--err) 40%, var(--line));
+  background: var(--err-soft);
+  border-radius: var(--radius-md);
+  padding: var(--space-5);
+  display: grid;
+  gap: var(--space-4);
+}
+
+.confirm p {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.actions {
+  display: flex;
+  gap: var(--space-4);
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.actions .spacer {
+  flex: 1;
+}
+
+.btn {
+  border: var(--border);
+  background: var(--surface);
+  border-radius: var(--radius-sm);
+  padding: var(--space-3) var(--space-5);
+  font-weight: 700;
+  font-size: 13px;
+}
+
+.btn[data-variant="primary"] {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: #fff;
+}
+
+.btn[data-variant="danger"] {
+  color: var(--err);
+  border-color: color-mix(in srgb, var(--err) 35%, var(--line));
+}
+
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}

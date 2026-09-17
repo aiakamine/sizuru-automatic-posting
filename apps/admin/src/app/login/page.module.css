@@ -1,0 +1,91 @@
+.page {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: var(--space-6);
+}
+
+.card {
+  width: min(380px, 100%);
+  background: var(--surface);
+  border: var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow);
+  padding: var(--space-7);
+  display: grid;
+  gap: var(--space-6);
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  font-weight: 900;
+  font-size: 18px;
+}
+
+.brandMark {
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-sm);
+  background: var(--primary);
+  display: grid;
+  place-items: center;
+  color: #fff;
+  font-size: 14px;
+}
+
+.title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.field {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.field label {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--muted);
+}
+
+.field input {
+  border: var(--border);
+  border-radius: var(--radius-sm);
+  padding: var(--space-3) var(--space-4);
+  background: var(--surface);
+  width: 100%;
+}
+
+.submit {
+  border: var(--border);
+  background: var(--primary);
+  border-color: var(--primary);
+  color: #fff;
+  border-radius: var(--radius-sm);
+  padding: var(--space-4) var(--space-5);
+  font-weight: 700;
+  font-size: 14px;
+}
+
+.submit:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.note {
+  font-size: 13px;
+  color: var(--muted);
+  background: var(--surface-2);
+  border-radius: var(--radius-sm);
+  padding: var(--space-4);
+  margin: 0;
+}
+
+.note[data-tone="err"] {
+  color: var(--err);
+  background: var(--err-soft);
+}

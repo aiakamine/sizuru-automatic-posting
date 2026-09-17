@@ -1,0 +1,35 @@
+.mark {
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  display: inline-grid;
+  place-items: center;
+  color: #fff;
+  flex: none;
+  line-height: 1;
+}
+
+.mark[data-size="sm"] {
+  width: 20px;
+  height: 20px;
+  border-radius: 5px;
+}
+
+.mark[data-service="tiktok"],
+.mark[data-service="x"] {
+  background: #111;
+}
+
+.mark[data-service="instagram"] {
+  background: radial-gradient(circle at 30% 107%, #fdd55a 0%, #f7713a 35%, #d6249f 62%, #6a3edb 100%);
+}
+
+.mark svg {
+  width: 15px;
+  height: 15px;
+}
+
+.mark[data-size="sm"] svg {
+  width: 12px;
+  height: 12px;
+}

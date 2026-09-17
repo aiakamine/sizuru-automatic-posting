@@ -1,0 +1,77 @@
+.week {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(168px, 1fr));
+  gap: 0;
+  overflow-x: auto;
+  background: var(--surface);
+  border: var(--border);
+  border-radius: var(--radius-lg);
+}
+
+.day {
+  border-left: var(--border);
+  min-height: 480px;
+  display: flex;
+  flex-direction: column;
+}
+
+.day:first-child {
+  border-left: 0;
+}
+
+.dayHeader {
+  padding: var(--space-4) var(--space-4) var(--space-3);
+  border-bottom: var(--border);
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+}
+
+.dayHeader b {
+  font-size: 18px;
+  font-weight: 900;
+}
+
+.dayHeader small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.day[data-today="true"] .dayHeader b {
+  color: var(--primary-ink);
+}
+
+.day[data-today="true"] .dayHeader small::after {
+  content: " 今日";
+  color: var(--primary-ink);
+  font-weight: 700;
+}
+
+.dayBody {
+  padding: var(--space-3);
+  display: grid;
+  gap: var(--space-3);
+  align-content: start;
+}
+
+.empty {
+  font-size: 12px;
+  color: var(--faint);
+  padding: var(--space-1);
+}
+
+@media (max-width: 760px) {
+  .week {
+    grid-template-columns: 1fr;
+  }
+
+  .day {
+    border-left: 0;
+    border-top: var(--border);
+    min-height: 0;
+  }
+
+  .day:first-child {
+    border-top: 0;
+  }
+}

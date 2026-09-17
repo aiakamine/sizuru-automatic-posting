@@ -1,0 +1,42 @@
+.strip {
+  display: flex;
+  gap: var(--space-5);
+  overflow-x: auto;
+  padding: var(--space-5) var(--space-6) var(--space-6);
+}
+
+.card {
+  flex: none;
+  width: 112px;
+  display: grid;
+  gap: var(--space-3);
+  background: none;
+  border: 0;
+  padding: 0;
+  text-align: left;
+}
+
+.card b {
+  font-size: 12px;
+  line-height: 1.45;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.card small {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.services {
+  display: flex;
+  gap: 3px;
+}
+
+.empty {
+  padding: var(--space-6);
+  color: var(--muted);
+  font-size: 13px;
+}

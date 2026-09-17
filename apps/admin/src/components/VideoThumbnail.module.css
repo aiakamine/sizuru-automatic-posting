@@ -1,0 +1,41 @@
+.thumb {
+  width: 40px;
+  aspect-ratio: 9 / 16;
+  border-radius: var(--radius-sm);
+  position: relative;
+  flex: none;
+  max-width: 100%;
+  overflow: hidden;
+  background: linear-gradient(160deg, var(--primary), var(--primary-ink));
+}
+
+.thumb[data-size="lg"] {
+  width: 112px;
+  border-radius: var(--radius-md);
+}
+
+.image {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.duration {
+  position: absolute;
+  right: 2px;
+  bottom: 2px;
+  font-size: 9px;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.55);
+  padding: 0 3px;
+  border-radius: 3px;
+  font-family: var(--font-mono);
+}
+
+.thumb[data-size="lg"] .duration {
+  font-size: 11px;
+  right: 6px;
+  bottom: 6px;
+  padding: 1px 5px;
+}

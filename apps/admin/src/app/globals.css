@@ -1,0 +1,131 @@
+/* デザイントークン: apps/admin/design.md を正とする。ここに定義した変数以外の
+   アドホックな hex / px をコンポーネントの CSS に直書きしない。 */
+:root {
+  --bg: #f4f6fa;
+  --surface: #ffffff;
+  --surface-2: #f8fafd;
+  --line: #e4e8ef;
+  --text: #1b2330;
+  --muted: #6a7486;
+  --faint: #9aa3b2;
+  --primary: #1d6fe8;
+  --primary-ink: #1559c0;
+  --primary-soft: #e9f1fe;
+  --ok: #15803d;
+  --ok-soft: #e6f5eb;
+  --err: #d23b30;
+  --err-soft: #fdecea;
+  --draft: #5b6678;
+  --draft-soft: #eef1f5;
+  --cancel: #8a93a2;
+  --cancel-soft: #f1f3f6;
+  --shadow: 0 1px 2px rgba(20, 32, 56, 0.05), 0 4px 16px rgba(20, 32, 56, 0.05);
+  --overlay: rgba(15, 23, 36, 0.38);
+
+  --radius-sm: 8px;
+  --radius-md: 10px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+  --radius-pill: 999px;
+
+  --space-1: 4px;
+  --space-2: 6px;
+  --space-3: 8px;
+  --space-4: 10px;
+  --space-5: 12px;
+  --space-6: 16px;
+  --space-7: 20px;
+
+  --font-sans: var(--font-noto-sans-jp), "Hiragino Sans", "Yu Gothic", system-ui, sans-serif;
+  --font-mono: var(--font-roboto-mono), ui-monospace, monospace;
+
+  --border: 1px solid var(--line);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0d121a;
+    --surface: #141b25;
+    --surface-2: #18212d;
+    --line: #263142;
+    --text: #e5eaf1;
+    --muted: #98a3b4;
+    --faint: #6d788a;
+    --primary: #5a9bff;
+    --primary-ink: #8dbbff;
+    --primary-soft: #16273f;
+    --ok: #5bcb85;
+    --ok-soft: #14301f;
+    --err: #f08378;
+    --err-soft: #3a1d1b;
+    --draft: #a5b0c0;
+    --draft-soft: #1f2835;
+    --cancel: #7d8798;
+    --cancel-soft: #1b222d;
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+    --overlay: rgba(0, 0, 0, 0.55);
+  }
+}
+
+:root[data-theme="dark"] {
+  --bg: #0d121a;
+  --surface: #141b25;
+  --surface-2: #18212d;
+  --line: #263142;
+  --text: #e5eaf1;
+  --muted: #98a3b4;
+  --faint: #6d788a;
+  --primary: #5a9bff;
+  --primary-ink: #8dbbff;
+  --primary-soft: #16273f;
+  --ok: #5bcb85;
+  --ok-soft: #14301f;
+  --err: #f08378;
+  --err-soft: #3a1d1b;
+  --draft: #a5b0c0;
+  --draft-soft: #1f2835;
+  --cancel: #7d8798;
+  --cancel-soft: #1b222d;
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --overlay: rgba(0, 0, 0, 0.55);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  padding: 0;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
+.num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
