@@ -1,0 +1,508 @@
+<title>切り抜きレビュー</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Dela+Gothic+One&family=BIZ+UDPGothic:wght@400;700&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --ground: #F2F3EF;
+    --paper: #FFFFFF;
+    --ink: #17191C;
+    --muted: #5E6570;
+    --rule: #D9DCD4;
+    --accent: #1F5FBF;
+    --ok: #2E7D4F;
+    --warn: #A86400;
+    --ng: #B3261E;
+    color-scheme: light;
+
+    --font-display: 'Dela Gothic One', "Hiragino Sans", system-ui, sans-serif;
+    --font-body: 'BIZ UDPGothic', "Hiragino Sans", system-ui, sans-serif;
+    --font-mono: 'JetBrains Mono', ui-monospace, Menlo, monospace;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground: #121416;
+      --paper: #1B1E21;
+      --ink: #E8EAE6;
+      --muted: #9AA1A9;
+      --rule: #2C3035;
+      --accent: #7FA8F0;
+      --ok: #6CC08F;
+      --warn: #E0A84A;
+      --ng: #F08A80;
+      color-scheme: dark;
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --ground: #121416;
+    --paper: #1B1E21;
+    --ink: #E8EAE6;
+    --muted: #9AA1A9;
+    --rule: #2C3035;
+    --accent: #7FA8F0;
+    --ok: #6CC08F;
+    --warn: #E0A84A;
+    --ng: #F08A80;
+    color-scheme: dark;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--font-body);
+    padding-inline: max(16px, env(safe-area-inset-left));
+    padding-block: 24px;
+    line-height: 1.6;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { transition: none !important; animation: none !important; }
+  }
+
+  a { color: var(--accent); }
+
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  .wrap { max-width: 1180px; margin-inline: auto; }
+
+  header.page-header {
+    margin-bottom: 24px;
+  }
+
+  h1.page-title {
+    font-family: var(--font-display);
+    font-size: clamp(22px, 3.5vw, 32px);
+    margin: 0 0 8px;
+  }
+
+  .page-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 16px;
+    color: var(--muted);
+    font-size: 14px;
+    overflow-wrap: anywhere;
+  }
+
+  .page-meta .mono { font-family: var(--font-mono); }
+
+  .status-summary {
+    margin-top: 12px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 16px;
+    font-size: 14px;
+  }
+
+  .status-summary .count { font-family: var(--font-mono); font-weight: 500; }
+
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    gap: 20px;
+  }
+
+  @media (max-width: 420px) {
+    .grid { grid-template-columns: 1fr; }
+  }
+
+  .card {
+    background: var(--paper);
+    border: 1px solid var(--rule);
+    border-radius: 10px;
+    padding: 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .media {
+    width: 100%;
+    aspect-ratio: 9 / 16;
+    border-radius: 8px;
+    overflow: hidden;
+    background: var(--ground);
+    border: 1px solid var(--rule);
+  }
+
+  .media video {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+  }
+
+  .media.placeholder {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--muted);
+    font-size: 13px;
+    text-align: center;
+    padding: 12px;
+  }
+
+  .clip-heading {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+  }
+
+  .clip-no {
+    font-family: var(--font-display);
+    font-size: 20px;
+    color: var(--accent);
+    flex-shrink: 0;
+  }
+
+  .clip-title {
+    font-weight: 700;
+    font-size: 15px;
+    overflow-wrap: anywhere;
+  }
+
+  .clip-stats {
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+    color: var(--muted);
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+
+  details.title-options summary {
+    cursor: pointer;
+    font-size: 13px;
+    color: var(--muted);
+  }
+
+  details.title-options .option {
+    margin-top: 8px;
+    font-size: 13px;
+    padding-left: 12px;
+    border-left: 2px solid var(--rule);
+  }
+
+  details.title-options .option .reason {
+    color: var(--muted);
+    font-size: 12px;
+  }
+
+  .schedule {
+    margin-top: 4px;
+    padding-top: 10px;
+    border-top: 1px solid var(--rule);
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .schedule .due-at {
+    font-family: var(--font-mono);
+    font-size: 13px;
+    font-weight: 500;
+  }
+
+  .target-row {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 10px;
+    border-radius: 8px;
+    background: var(--ground);
+  }
+
+  .target-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .platform-chip {
+    font-size: 12px;
+    font-weight: 700;
+    padding: 2px 8px;
+    border-radius: 999px;
+    border: 1px solid var(--rule);
+    background: var(--paper);
+  }
+
+  .status-pill {
+    font-size: 12px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-weight: 500;
+  }
+
+  .status-pill[data-status="proposed"] { color: var(--muted); background: color-mix(in srgb, var(--muted) 16%, transparent); }
+  .status-pill[data-status="scheduled"] { color: var(--accent); background: color-mix(in srgb, var(--accent) 16%, transparent); }
+  .status-pill[data-status="sent"] { color: var(--ok); background: color-mix(in srgb, var(--ok) 16%, transparent); }
+  .status-pill[data-status="draft"] { color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); }
+  .status-pill[data-status="failed"] { color: var(--ng); background: color-mix(in srgb, var(--ng) 16%, transparent); }
+  .status-pill[data-status="unknown"] { color: var(--warn); background: color-mix(in srgb, var(--warn) 16%, transparent); }
+  .status-pill[data-status="skipped"] { color: var(--muted); background: color-mix(in srgb, var(--muted) 10%, transparent); }
+  .status-pill[data-status="not_attempted"] { color: var(--muted); background: color-mix(in srgb, var(--muted) 10%, transparent); }
+  .status-pill[data-status="canceled"] { color: var(--muted); background: color-mix(in srgb, var(--muted) 10%, transparent); }
+  .status-pill[data-status="db_write_failed"] { color: var(--warn); background: color-mix(in srgb, var(--warn) 16%, transparent); }
+
+  .external-link { font-size: 12px; font-family: var(--font-mono); margin-left: auto; }
+
+  .caption-box {
+    white-space: pre-wrap;
+    font-size: 13px;
+    max-height: 120px;
+    overflow-y: auto;
+    background: var(--paper);
+    border: 1px solid var(--rule);
+    border-radius: 6px;
+    padding: 8px;
+  }
+
+  .caption-counter {
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    color: var(--muted);
+    align-self: flex-end;
+  }
+
+  .caption-counter.over { color: var(--ng); font-weight: 500; }
+
+  .error-note {
+    font-size: 12px;
+    color: var(--ng);
+  }
+</style>
+
+<script type="application/json" id="gallery-data">
+{
+  "project": "営業統括の1日に密着",
+  "delivered_at": "2026-09-23",
+  "delivery_dir": "/Users/example/Desktop/営業統括の1日に密着_切り抜き4本_20260923",
+  "main_video_url": "https://www.youtube.com/watch?v=example",
+  "clips": [
+    {
+      "no": 1,
+      "file": "/Users/example/Desktop/営業統括の1日に密着_切り抜き4本_20260923/01_評価されない営業マンへ.mp4",
+      "title": "評価されない営業マンへ",
+      "title_options": [
+        {"text": "評価されない営業マンへ｜結果を出しても報われない理由", "reason": "赤引用の再利用＋体言止め"},
+        {"text": "「結果が出てるのに評価されない」の正体", "reason": "発言引用スタート型"}
+      ],
+      "duration_sec": 54.2,
+      "size_bytes": 18874368,
+      "video_url": null,
+      "schedule": {
+        "due_at": "2026-09-25T19:00:00+09:00",
+        "targets": [
+          {"service": "tiktok", "caption": "評価されない理由、実は単純でした。\n#営業 #キャリア #密着", "length": 32, "limit": 2200, "status": "scheduled", "external_link": null, "error": null},
+          {"service": "instagram", "caption": "評価されない理由、実は単純でした。\n保存して見返してください。\n#営業 #キャリア", "length": 40, "limit": 2200, "status": "proposed", "external_link": null, "error": null},
+          {"service": "x", "caption": "評価されない理由、実は単純でした。 #営業", "length": 24, "limit": 280, "status": "failed", "external_link": null, "error": "Bufferとの通信でエラーが発生しました"}
+        ]
+      }
+    },
+    {
+      "no": 2,
+      "file": "/Users/example/Desktop/営業統括の1日に密着_切り抜き4本_20260923/02_数字より先に人を見る.mp4",
+      "title": "数字より先に人を見る",
+      "title_options": [
+        {"text": "数字より先に人を見る｜営業統括の判断基準", "reason": "体言止め＋役職の属性"}
+      ],
+      "duration_sec": 49.8,
+      "size_bytes": 21495808,
+      "video_url": null,
+      "schedule": null
+    }
+  ]
+}
+</script>
+
+<div class="wrap">
+  <header class="page-header">
+    <h1 class="page-title" id="page-title">切り抜きレビュー</h1>
+    <div class="page-meta" id="page-meta"></div>
+    <div class="status-summary" id="status-summary" hidden></div>
+  </header>
+  <main class="grid" id="clip-grid"></main>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  const STATUS_LABEL = {
+    proposed: "予約案",
+    scheduled: "予約済",
+    sent: "投稿済",
+    draft: "下書き",
+    failed: "失敗",
+    unknown: "要確認",
+    skipped: "対象外",
+    not_attempted: "未送信",
+    canceled: "取消",
+    db_write_failed: "要確認",
+  };
+
+  const PLATFORM_LABEL = { tiktok: "TikTok", instagram: "Instagram", x: "X" };
+
+  const WEEKDAY_JA = ["日", "月", "火", "水", "木", "金", "土"];
+
+  function escapeHtml(value) {
+    return String(value).replace(/[&<>"']/g, function (ch) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[ch];
+    });
+  }
+
+  function formatBytes(bytes) {
+    if (typeof bytes !== "number") return "-";
+    const mb = bytes / (1024 * 1024);
+    return mb.toFixed(1) + "MB";
+  }
+
+  function formatDuration(sec) {
+    if (typeof sec !== "number") return "-";
+    const m = Math.floor(sec / 60);
+    const s = Math.round(sec % 60);
+    return m > 0 ? `${m}:${String(s).padStart(2, "0")}` : `${s}s`;
+  }
+
+  function formatJst(isoString) {
+    const d = new Date(isoString);
+    if (isNaN(d.getTime())) return isoString;
+    const formatter = new Intl.DateTimeFormat("ja-JP", {
+      timeZone: "Asia/Tokyo",
+      month: "numeric",
+      day: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    });
+    const parts = {};
+    for (const part of formatter.formatToParts(d)) parts[part.type] = part.value;
+    // Compute the weekday directly in JST (UTC+9) instead of relying on
+    // locale-dependent weekday parsing.
+    const jstMillis = d.getTime() + 9 * 60 * 60 * 1000;
+    const jstDate = new Date(jstMillis);
+    const weekday = WEEKDAY_JA[jstDate.getUTCDay()];
+    return `${parts.month}/${parts.day}(${weekday}) ${parts.hour}:${parts.minute}`;
+  }
+
+  function renderMedia(clip) {
+    if (clip.video_url) {
+      return `<div class="media"><video controls preload="metadata" playsinline src="${escapeHtml(clip.video_url)}"></video></div>`;
+    }
+    return `<div class="media placeholder">プレビュー未添付</div>`;
+  }
+
+  function renderTitleOptions(options) {
+    if (!options || options.length === 0) return "";
+    const items = options
+      .map(
+        (opt) =>
+          `<div class="option"><div>${escapeHtml(opt.text)}</div><div class="reason">${escapeHtml(opt.reason)}</div></div>`
+      )
+      .join("");
+    return `<details class="title-options"><summary>タイトル案</summary>${items}</details>`;
+  }
+
+  function renderTargetRow(target) {
+    const label = PLATFORM_LABEL[target.service] || target.service;
+    const statusLabel = STATUS_LABEL[target.status] || target.status;
+    const over = typeof target.length === "number" && typeof target.limit === "number" && target.length > target.limit;
+    const counter = typeof target.length === "number" && typeof target.limit === "number"
+      ? `<div class="caption-counter${over ? " over" : ""}">${target.length}/${target.limit}</div>`
+      : "";
+    const link = target.external_link
+      ? `<a class="external-link" href="${escapeHtml(target.external_link)}" target="_blank" rel="noopener">投稿を見る</a>`
+      : "";
+    const error = target.error ? `<div class="error-note">${escapeHtml(target.error)}</div>` : "";
+    return `
+      <div class="target-row">
+        <div class="target-head">
+          <span class="platform-chip">${escapeHtml(label)}</span>
+          <span class="status-pill" data-status="${escapeHtml(target.status)}">${escapeHtml(statusLabel)}</span>
+          ${link}
+        </div>
+        <div class="caption-box">${escapeHtml(target.caption)}</div>
+        ${counter}
+        ${error}
+      </div>`;
+  }
+
+  function renderSchedule(schedule) {
+    if (!schedule) return "";
+    const rows = (schedule.targets || []).map(renderTargetRow).join("");
+    return `
+      <div class="schedule">
+        <div class="due-at">${escapeHtml(formatJst(schedule.due_at))}</div>
+        ${rows}
+      </div>`;
+  }
+
+  function renderCard(clip) {
+    return `
+      <article class="card">
+        ${renderMedia(clip)}
+        <div class="clip-heading">
+          <span class="clip-no">${escapeHtml(String(clip.no).padStart(2, "0"))}</span>
+          <span class="clip-title">${escapeHtml(clip.title)}</span>
+        </div>
+        <div class="clip-stats">
+          <span>${escapeHtml(formatDuration(clip.duration_sec))}</span>
+          <span>${escapeHtml(formatBytes(clip.size_bytes))}</span>
+        </div>
+        ${renderTitleOptions(clip.title_options)}
+        ${renderSchedule(clip.schedule)}
+      </article>`;
+  }
+
+  function renderStatusSummary(clips) {
+    const counts = {};
+    for (const clip of clips) {
+      if (!clip.schedule) continue;
+      for (const target of clip.schedule.targets || []) {
+        counts[target.status] = (counts[target.status] || 0) + 1;
+      }
+    }
+    const order = ["scheduled", "proposed", "sent", "failed", "unknown", "skipped", "not_attempted"];
+    const parts = order
+      .filter((status) => counts[status])
+      .map((status) => `<span>${STATUS_LABEL[status]} <span class="count">${counts[status]}</span></span>`);
+    return parts.join("");
+  }
+
+  function render(data) {
+    document.title = `${data.project} 切り抜き`;
+    document.getElementById("page-title").textContent = data.project;
+    const mainVideoLink = data.main_video_url
+      ? `<a href="${escapeHtml(data.main_video_url)}" target="_blank" rel="noopener">本編を見る</a>`
+      : "";
+    document.getElementById("page-meta").innerHTML = `
+      <span>${escapeHtml(data.delivered_at)}</span>
+      <span class="mono">${data.clips.length}本</span>
+      <span>${escapeHtml(data.delivery_dir)}</span>
+      ${mainVideoLink}`;
+
+    const summaryHtml = renderStatusSummary(data.clips);
+    const summaryEl = document.getElementById("status-summary");
+    if (summaryHtml) {
+      summaryEl.innerHTML = summaryHtml;
+      summaryEl.hidden = false;
+    }
+
+    document.getElementById("clip-grid").innerHTML = data.clips.map(renderCard).join("");
+  }
+
+  const dataEl = document.getElementById("gallery-data");
+  const data = JSON.parse(dataEl.textContent);
+  render(data);
+})();
+</script>

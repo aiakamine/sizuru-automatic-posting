@@ -37,14 +37,24 @@ dev = [
 line-length = 110
 target-version = "py312"
 # Vendored third-party code (see src/sizuru_post/_vendor/README.md) — not
-# ours to restyle.
-extend-exclude = ["src/sizuru_post/_vendor"]
+# ours to restyle. The imported kirinuki-* skills keep their own upstream
+# style (see .claude/skills/KIRINUKI_README.md) and are excluded too.
+extend-exclude = [
+    "src/sizuru_post/_vendor",
+    ".claude/skills/mitchaku-kirinuki",
+    ".claude/skills/taidan-kirinuki",
+    ".claude/skills/kirinuki_core",
+    ".claude/skills/kirinuki_hooks",
+    ".claude/skills/tests",
+]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["E501"]
+".claude/skills/sns-schedule/tests/*" = ["E501"]
+".claude/hooks/tests/*" = ["E501"]
 
 [tool.mypy]
 python_version = "3.12"
@@ -65,5 +75,5 @@ ignore_errors = true
 follow_imports = "skip"
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests", ".claude/skills/sns-schedule/tests"]
 addopts = "-ra"

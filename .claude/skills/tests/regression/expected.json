@@ -1,0 +1,25 @@
+{
+  "clip_file": "01_regression.mp4",
+  "av_duration_diff_ms_max": 33.36666666666667,
+  "lufs_target": -14.0,
+  "lufs_tolerance": 0.5,
+  "qc_ng_count": 0,
+  "dup_frame_window": 90,
+  "dup_frame_margin": 2,
+  "dup_frame_baseline": 1,
+  "dup_frame_max": 3,
+  "cuts": [
+    {
+      "index": 0,
+      "n_frames": 212,
+      "head_hash": "f699856b95c73b2917216a8ac5230626",
+      "tail_hash": "6bf043856a0625c4ec8fef244bdf7135"
+    },
+    {
+      "index": 1,
+      "n_frames": 383,
+      "head_hash": "c1962b30aacd816ee89eebfc91b24116",
+      "tail_hash": "d1974e5f8452df7f1599006e664cd875"
+    }
+  ]
+}
