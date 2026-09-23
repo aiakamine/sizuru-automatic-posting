@@ -10,6 +10,23 @@ from typing import Literal, Self
 from pydantic import BaseModel, Field, model_validator
 
 
+def validate_due_at_is_future(due_at: datetime) -> str | None:
+    """The shared due_at rule: must carry a timezone and be in the future.
+
+    Used by Timing (below), Publisher.edit(), api/handler.py's
+    PATCH /posts/{id}, and api/schedule.py's per-target due_at — those four
+    call sites each need a different exception type for their own layer
+    (pydantic ValueError via Timing, RequestValidationError, ApiError,
+    ScheduleTargetInput's own ValueError), so this returns a message (or
+    None if valid) for the caller to wrap, rather than raising itself.
+    """
+    if due_at.tzinfo is None:
+        return "due_at はタイムゾーン情報を含む必要があります"
+    if due_at <= datetime.now(UTC):
+        return "due_at は未来の日時を指定してください"
+    return None
+
+
 class Timing(BaseModel):
     """When a post should go out."""
 
@@ -21,10 +38,9 @@ class Timing(BaseModel):
         if self.mode == "customScheduled":
             if self.due_at is None:
                 raise ValueError("customScheduled には due_at が必須です")
-            if self.due_at.tzinfo is None:
-                raise ValueError("due_at はタイムゾーン情報を含む必要があります")
-            if self.due_at <= datetime.now(UTC):
-                raise ValueError("due_at は未来の日時を指定してください")
+            error = validate_due_at_is_future(self.due_at)
+            if error is not None:
+                raise ValueError(error)
         elif self.due_at is not None:
             raise ValueError("due_at は customScheduled の場合のみ指定できます")
         return self
@@ -45,7 +61,12 @@ class Target(BaseModel):
 class PublishRequest(BaseModel):
     """A full publish request: one video, one or more targets."""
 
-    video_path: Path
+    video_path: Path | None = None
+    """None means the video was already uploaded out-of-band (the
+    scheduling API's flow — see Publisher.publish_uploaded): only that
+    entry point accepts None. The CLI's `validate`/`publish` commands
+    require an actual local file and reject None explicitly (see
+    cli._load_request)."""
     title: str | None = None
     timing: Timing
     targets: list[Target] = Field(min_length=1)

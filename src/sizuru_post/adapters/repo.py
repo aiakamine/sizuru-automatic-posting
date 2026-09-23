@@ -20,9 +20,23 @@ from datetime import datetime
 from typing import Any, Protocol
 from uuid import UUID
 
+from postgrest.exceptions import APIError
 from pydantic import BaseModel, Field
 
 from sizuru_post.domain.models import PostStatus
+
+# The Postgres SQLSTATE for a unique-constraint violation, surfaced by
+# PostgREST as APIError.code — see create_submission()/UniqueViolationError.
+_UNIQUE_VIOLATION_CODE = "23505"
+
+
+class UniqueViolationError(ValueError):
+    """create_submission(): a concurrent request already inserted a
+    submission with this s3_key (submissions.s3_key is UNIQUE) — the
+    caller (Publisher.publish_uploaded) should re-fetch it via
+    get_submission_by_s3_key() instead of treating this as a failure. A
+    ValueError subclass so any existing broad `except ValueError` call
+    site still behaves sanely if it doesn't specifically handle this."""
 
 # --- Schema surface: table & column names --------------------------------
 # Every Supabase query below references these constants instead of inline
@@ -36,6 +50,12 @@ TABLE_ADMIN_USERS = "admin_users"
 COLUMN_ID = "id"
 COLUMN_SUBMISSION_ID = "submission_id"
 COLUMN_STATUS = "status"
+COLUMN_S3_KEY = "s3_key"
+COLUMN_DUE_AT = "due_at"
+
+# list_posts_in_range() excludes these — canceled/failed posts aren't
+# candidates for the scheduling skill's "what slots are taken" query.
+_RANGE_EXCLUDED_STATUSES = [PostStatus.CANCELED.value, PostStatus.FAILED.value]
 
 CHANNELS_UPSERT_CONFLICT = "buffer_channel_id"
 POSTS_UPSERT_CONFLICT = "submission_id,channel_id"
@@ -67,6 +87,18 @@ class SubmissionRow(BaseModel):
     duration_sec: float | None = None
     approved_at: datetime
     created_at: datetime | None = None
+
+
+class PostInRange(BaseModel):
+    """A row from `list_posts_in_range()`: just enough for the scheduling
+    skill to show "what's already taken" — not a full PostRow."""
+
+    post_id: UUID
+    submission_id: UUID
+    service: str
+    due_at: datetime
+    status: str
+    title: str | None = None
 
 
 class PostRow(BaseModel):
@@ -109,7 +141,11 @@ class Repo(Protocol):
 
     def get_submission(self, submission_id: UUID) -> SubmissionRow | None: ...
 
-    def upsert_post_pending(
+    def get_submission_by_s3_key(self, s3_key: str) -> SubmissionRow | None: ...
+
+    def list_posts_in_range(self, start: datetime, end: datetime) -> list[PostInRange]: ...
+
+    def claim_pending_post(
         self,
         *,
         submission_id: UUID,
@@ -119,7 +155,7 @@ class Repo(Protocol):
         due_at: datetime | None,
         is_draft: bool,
         platform_options: dict[str, Any],
-    ) -> PostRow: ...
+    ) -> tuple[PostRow, bool]: ...
 
     def update_post(self, post_id: UUID, **fields: Any) -> None: ...
 
@@ -151,15 +187,49 @@ def _serialize(fields: dict[str, Any]) -> dict[str, Any]:
     return serialized
 
 
+def _row_to_post_in_range(row: dict[str, Any]) -> PostInRange:
+    """Flatten a list_posts_in_range() row's embedded `channels`/`submissions`
+    objects (PostgREST returns a many-to-one embed as a single object, not
+    an array) into a PostInRange."""
+    channel = row.get("channels") or {}
+    submission = row.get("submissions") or {}
+    return PostInRange(
+        post_id=row[COLUMN_ID],
+        submission_id=row[COLUMN_SUBMISSION_ID],
+        service=channel.get("service", ""),
+        due_at=row[COLUMN_DUE_AT],
+        status=row[COLUMN_STATUS],
+        title=submission.get("title"),
+    )
+
+
 class SupabaseRepo:
     def __init__(self, client: Any) -> None:
         self._client = client
 
     def upsert_channels(self, channels: list[dict[str, Any]]) -> None:
+        """Upsert Buffer's current channel list, and mark every DB channel
+        whose buffer_channel_id is NOT in it as disconnected (a channel
+        missing entirely from a successful, non-empty fetch means Buffer
+        no longer has it — e.g. it was replaced). A channel that
+        reappears later is reconnected automatically by the upsert above,
+        which writes its is_disconnected straight from Buffer's response.
+
+        The `if not valid: return` guard is also what keeps this from
+        ever mass-disconnecting every channel on an empty/failed fetch —
+        this method simply isn't called with anything to diff against.
+        """
         valid = [c for c in channels if c.get("service") in VALID_CHANNEL_SERVICES]
         if not valid:
             return
         self._client.table(TABLE_CHANNELS).upsert(valid, on_conflict=CHANNELS_UPSERT_CONFLICT).execute()
+        buffer_channel_ids = [c[CHANNELS_UPSERT_CONFLICT] for c in valid]
+        (
+            self._client.table(TABLE_CHANNELS)
+            .update({"is_disconnected": True})
+            .not_.in_(CHANNELS_UPSERT_CONFLICT, buffer_channel_ids)
+            .execute()
+        )
 
     def list_channels(self) -> list[ChannelRow]:
         response = self._client.table(TABLE_CHANNELS).select("*").execute()
@@ -185,7 +255,15 @@ class SupabaseRepo:
                 "approved_at": approved_at,
             }
         )
-        response = self._client.table(TABLE_SUBMISSIONS).insert(payload).execute()
+        try:
+            response = self._client.table(TABLE_SUBMISSIONS).insert(payload).execute()
+        except APIError as exc:
+            if exc.code == _UNIQUE_VIOLATION_CODE:
+                # A concurrent publish_uploaded() call for the same
+                # video's s3_key won the race — the caller re-fetches via
+                # get_submission_by_s3_key() instead.
+                raise UniqueViolationError(f"s3_key は既に存在します: {s3_key}") from exc
+            raise
         return UUID(str(response.data[0][COLUMN_ID]))
 
     def get_submission(self, submission_id: UUID) -> SubmissionRow | None:
@@ -195,7 +273,34 @@ class SupabaseRepo:
         rows = response.data or []
         return SubmissionRow.model_validate(rows[0]) if rows else None
 
-    def upsert_post_pending(
+    def get_submission_by_s3_key(self, s3_key: str) -> SubmissionRow | None:
+        """The idempotency lookup for `Publisher.publish_uploaded`:
+        `submissions.s3_key` is UNIQUE, so a resent scheduling request with
+        the same key must reuse this row instead of inserting a duplicate."""
+        response = (
+            self._client.table(TABLE_SUBMISSIONS).select("*").eq(COLUMN_S3_KEY, s3_key).execute()
+        )
+        rows = response.data or []
+        return SubmissionRow.model_validate(rows[0]) if rows else None
+
+    def list_posts_in_range(self, start: datetime, end: datetime) -> list[PostInRange]:
+        """Posts due in `[start, end)`, with just enough submission/channel
+        context for the scheduling skill's "what's already taken" query —
+        canceled/failed and due_at=NULL posts are never candidates."""
+        response = (
+            self._client.table(TABLE_POSTS)
+            .select(f"{COLUMN_ID},{COLUMN_SUBMISSION_ID},{COLUMN_DUE_AT},{COLUMN_STATUS},"
+                    "channels(service),submissions(title)")
+            .gte(COLUMN_DUE_AT, start.isoformat())
+            .lt(COLUMN_DUE_AT, end.isoformat())
+            .not_.in_(COLUMN_STATUS, _RANGE_EXCLUDED_STATUSES)
+            .order(COLUMN_DUE_AT)
+            .order(COLUMN_ID)
+            .execute()
+        )
+        return [_row_to_post_in_range(row) for row in response.data or []]
+
+    def claim_pending_post(
         self,
         *,
         submission_id: UUID,
@@ -205,7 +310,20 @@ class SupabaseRepo:
         due_at: datetime | None,
         is_draft: bool,
         platform_options: dict[str, Any],
-    ) -> PostRow:
+    ) -> tuple[PostRow, bool]:
+        """Atomically create the (submission_id, channel_id) post row, or
+        return the existing one if a concurrent caller already claimed it
+        first — `created` is True only when THIS call performed the
+        insert, so Publisher._publish_one knows it's the one that should
+        actually call Buffer (see that method).
+
+        `ignore_duplicates=True` maps to `ON CONFLICT ... DO NOTHING`,
+        which — unlike the plain upsert this replaced — never lets two
+        concurrent callers both "win" and both dispatch to Buffer. Postgres
+        returns NO row at all for a conflicting insert (not the existing
+        row), so a conflict is re-selected explicitly rather than assumed
+        from an empty response.
+        """
         payload = _serialize(
             {
                 "submission_id": submission_id,
@@ -219,9 +337,34 @@ class SupabaseRepo:
             }
         )
         response = (
-            self._client.table(TABLE_POSTS).upsert(payload, on_conflict=POSTS_UPSERT_CONFLICT).execute()
+            self._client.table(TABLE_POSTS)
+            .upsert(payload, on_conflict=POSTS_UPSERT_CONFLICT, ignore_duplicates=True)
+            .execute()
         )
-        return PostRow.model_validate(response.data[0])
+        if response.data:
+            return PostRow.model_validate(response.data[0]), True
+        existing = self._get_post_by_submission_and_channel(submission_id, channel_id)
+        if existing is None:
+            # The conflict itself guarantees a row exists; a missing one
+            # here would mean this state was observed inconsistently
+            # (e.g. read-replica lag) — surface that loudly rather than
+            # silently treating it as "created".
+            raise RuntimeError(
+                f"claim_pending_post: 競合を検出しましたが該当行が見つかりません"
+                f"（submission_id={submission_id}, channel_id={channel_id}）"
+            )
+        return existing, False
+
+    def _get_post_by_submission_and_channel(self, submission_id: UUID, channel_id: UUID) -> PostRow | None:
+        response = (
+            self._client.table(TABLE_POSTS)
+            .select("*")
+            .eq(COLUMN_SUBMISSION_ID, str(submission_id))
+            .eq("channel_id", str(channel_id))
+            .execute()
+        )
+        rows = response.data or []
+        return PostRow.model_validate(rows[0]) if rows else None
 
     def update_post(self, post_id: UUID, **fields: Any) -> None:
         payload = _serialize(fields)

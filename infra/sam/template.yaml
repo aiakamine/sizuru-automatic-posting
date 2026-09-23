@@ -2,11 +2,14 @@ AWSTemplateFormatVersion: "2010-09-09"
 Transform: AWS::Serverless-2016-10-31
 Description: >
   sizuru admin dashboard backend: an HTTP API (no gateway-level authorizer
-  — ApiFunction verifies the Supabase JWT itself; see infra/sam/README.md)
+  — ApiFunction verifies the Supabase JWT itself for its admin routes, and
+  a shared x-api-key for its /schedule/* routes; see infra/sam/README.md)
   in front of two Python Lambdas that reuse sizuru-post's existing
-  Publisher (edit/cancel/sync), an EventBridge Scheduler rule that syncs
-  every 15 minutes, and S3 + CloudFront (OAC) static hosting for the
-  Next.js frontend build. See infra/sam/README.md for deploy steps.
+  Publisher (edit/cancel/sync, and — for the sns-schedule skill —
+  presigned S3 uploads plus scheduled Buffer posts), an EventBridge
+  Scheduler rule that syncs every 15 minutes, and S3 + CloudFront (OAC)
+  static hosting for the Next.js frontend build. See infra/sam/README.md
+  for deploy steps.
 
 Parameters:
   SupabaseUrl:
@@ -28,10 +31,25 @@ Parameters:
     Type: String
     Default: /sizuru/
     Description: >
-      Prefix for the SecureString parameters holding BUFFER_API_KEY and
-      SUPABASE_SERVICE_ROLE_KEY. Both Lambdas resolve these at runtime
-      (factory.build_settings(), cached per container) rather than
-      receiving them as plain Lambda environment variables.
+      Prefix for the SecureString parameters holding BUFFER_API_KEY,
+      SUPABASE_SERVICE_ROLE_KEY and SCHEDULER_API_KEY. All three are
+      resolved at runtime (factory.build_settings(), cached per container)
+      rather than received as plain Lambda environment variables.
+      SCHEDULER_API_KEY is optional (see config.Settings.scheduler_api_key)
+      — if the parameter doesn't exist, /schedule/* routes 503 instead of
+      the deploy failing — AND only ever resolved by ApiFunction: it's the
+      only Lambda with a matching IAM grant, since it's the only one
+      serving /schedule/* routes (SyncFunction explicitly opts out via
+      build_settings(include_scheduler_key=False) — see
+      api/sync_handler.py — rather than requesting a parameter it has no
+      permission to read).
+  ClipsBucketName:
+    Type: String
+    Default: sizuru-clips-034165313077
+    Description: >
+      The S3 bucket the sns-schedule skill uploads videos/thumbnails into
+      (see adapters/storage.S3Storage) and that Buffer fetches media from.
+      Same bucket the CLI's `publish` command already uses locally.
   AllowedFrontendOrigin:
     Type: String
     Description: >
@@ -69,14 +87,24 @@ Resources:
     Properties:
       CodeUri: ../../
       Handler: sizuru_post.api.handler.handler
-      Description: Admin dashboard API — PATCH/cancel/sync a post via Publisher.
-      # Only ApiFunction needs these (SyncFunction has no HTTP caller to
-      # authenticate) — it verifies the Supabase JWT itself, in-process
-      # (see api/auth.py / api/handler.py::_authenticate).
+      Description: >
+        Admin dashboard API (PATCH/cancel/sync a post) + the sns-schedule
+        skill's /schedule/* routes (sizuru_post.api.schedule) — both via
+        the existing Publisher, dispatched from the same Lambda by
+        api/handler.py based on routeKey (see that module's docstring).
+      # SUPABASE_JWT_*: only ApiFunction needs these (SyncFunction has no
+      # HTTP caller to authenticate) — it verifies the Supabase JWT itself,
+      # in-process (see api/auth.py / api/handler.py::_authenticate).
+      # S3_*: for /schedule/uploads' presigned POSTs and /schedule/
+      # submissions' HeadObject checks (see api/schedule.py / adapters/
+      # storage.py) — SyncFunction never uploads, so it doesn't need these.
       Environment:
         Variables:
           SUPABASE_JWT_ISSUER: !Ref SupabaseJwtIssuer
           SUPABASE_JWT_AUDIENCE: !Ref SupabaseJwtAudience
+          S3_BUCKET: !Ref ClipsBucketName
+          S3_REGION: !Ref AWS::Region
+          S3_PUBLIC_PREFIX: public/
       Policies:
         - Statement:
             - Sid: ReadSizuruSecrets
@@ -85,6 +113,27 @@ Resources:
               Resource:
                 - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmParameterPrefix}BUFFER_API_KEY"
                 - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmParameterPrefix}SUPABASE_SERVICE_ROLE_KEY"
+                - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmParameterPrefix}SCHEDULER_API_KEY"
+            - Sid: ScheduleUploads
+              # The presigned POST is *signed* with this role's credentials
+              # (adapters/storage.S3Storage.presign_post), so the client's
+              # later multipart-form upload to S3 is authorized against
+              # this exact grant, even though the Lambda itself never calls
+              # PutObject directly.
+              Effect: Allow
+              Action: s3:PutObject
+              Resource: !Sub "arn:aws:s3:::${ClipsBucketName}/public/*"
+            - Sid: ScheduleExistenceCheck
+              # /schedule/submissions checks whether a video/thumbnail was
+              # actually uploaded via ListObjectsV2(Prefix=key), not
+              # HeadObject (see adapters/storage.S3Storage.exists's
+              # docstring for why) — no s3:GetObject needed at all.
+              Effect: Allow
+              Action: s3:ListBucket
+              Resource: !Sub "arn:aws:s3:::${ClipsBucketName}"
+              Condition:
+                StringLike:
+                  s3:prefix: "public/*"
       Events:
         EditPost:
           Type: HttpApi
@@ -103,6 +152,24 @@ Resources:
           Properties:
             ApiId: !Ref HttpApi
             Path: /sync
+            Method: POST
+        ScheduleUploads:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /schedule/uploads
+            Method: POST
+        SchedulePosts:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /schedule/posts
+            Method: GET
+        ScheduleSubmissions:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref HttpApi
+            Path: /schedule/submissions
             Method: POST
   ApiFunctionLogGroup:
     Type: AWS::Logs::LogGroup
@@ -129,6 +196,17 @@ Resources:
             - Sid: ReadSizuruSecrets
               Effect: Allow
               Action: ssm:GetParameter
+              # Deliberately NOT SCHEDULER_API_KEY: SyncFunction never
+              # serves /schedule/* routes (only ApiFunction does), and
+              # factory.build_settings(include_scheduler_key=False) — see
+              # api/sync_handler.py::get_settings — means it never even
+              # requests that parameter. A prior hot-fix briefly granted
+              # this anyway (production incident: an unhandled
+              # ssm:GetParameter AccessDenied on this exact parameter
+              # broke every SyncFunction invocation); removed again here
+              # now that the root cause is fixed in code, per least
+              # privilege — keeping an unused grant around serves no
+              # purpose and only widens this role's blast radius.
               Resource:
                 - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmParameterPrefix}BUFFER_API_KEY"
                 - !Sub "arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${SsmParameterPrefix}SUPABASE_SERVICE_ROLE_KEY"
@@ -181,10 +259,13 @@ Resources:
   # P-256) — the authorizer would reject every real token. ApiFunction
   # verifies the token itself instead, with PyJWT (see api/auth.py /
   # api/handler.py::_authenticate), then checks admin_users (see
-  # api/handler.py::_require_admin). Every route is therefore unauthenticated
-  # at the gateway layer; do not add a route here without auth logic in the
+  # api/handler.py::_require_admin). The /schedule/* routes use a
+  # different, equally in-Lambda scheme instead (x-api-key — see
+  # api/schedule.py). Every route is therefore unauthenticated at the
+  # gateway layer; do not add a route here without auth logic in the
   # Lambda handler. CORS is entirely API Gateway-managed, not set in Lambda
-  # responses.
+  # responses (the sns-schedule skill is a local CLI, not a browser, so
+  # CORS doesn't apply to its /schedule/* calls either way).
   # ---------------------------------------------------------------------------
   HttpApi:
     Type: AWS::Serverless::HttpApi

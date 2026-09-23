@@ -112,6 +112,53 @@ def test_build_publisher_without_uploads_uses_short_timeout_and_single_retry() -
     assert publisher._buffer._max_retries == 1  # noqa: SLF001
 
 
+def test_build_publisher_without_uploads_caps_retry_sleep() -> None:
+    # Arrange: a Lambda invocation has a hard wall-clock deadline — a long
+    # Buffer Retry-After must not be allowed to block past it (see
+    # adapters.buffer.BufferClient._sleep_or_raise).
+    settings = _settings()
+
+    # Act
+    publisher = build_publisher_without_uploads(settings)
+
+    # Assert
+    assert publisher._buffer._max_retry_sleep_seconds == 5.0  # noqa: SLF001
+
+
+def test_build_publisher_for_cli_does_not_cap_retry_sleep() -> None:
+    # Arrange: the CLI runs outside any Lambda deadline — unbounded,
+    # today's behavior.
+    settings = _settings(s3_bucket="my-bucket")
+
+    # Act
+    publisher = build_publisher(settings)
+
+    # Assert
+    assert publisher._buffer._max_retry_sleep_seconds is None  # noqa: SLF001
+
+
+def test_build_buffer_client_accepts_explicit_max_retry_sleep_seconds() -> None:
+    # Arrange
+    settings = _settings()
+
+    # Act
+    client = build_buffer_client(settings, max_retry_sleep_seconds=5.0)
+
+    # Assert
+    assert client._max_retry_sleep_seconds == 5.0  # noqa: SLF001
+
+
+def test_build_buffer_client_defaults_to_no_retry_sleep_cap() -> None:
+    # Arrange
+    settings = _settings()
+
+    # Act
+    client = build_buffer_client(settings)
+
+    # Assert
+    assert client._max_retry_sleep_seconds is None  # noqa: SLF001
+
+
 def test_build_publisher_uses_default_timeout_and_retries_for_cli() -> None:
     # Arrange
     settings = _settings(s3_bucket="my-bucket")
@@ -143,6 +190,12 @@ class _FakeSsmClient:
 
     def get_parameter(self, *, Name: str, WithDecryption: bool) -> dict[str, dict[str, str]]:
         self.calls.append(Name)
+        if Name not in self._values:
+            from botocore.exceptions import ClientError
+
+            raise ClientError(
+                {"Error": {"Code": "ParameterNotFound", "Message": f"{Name} not found"}}, "GetParameter"
+            )
         return {"Parameter": {"Value": self._values[Name]}}
 
 
@@ -189,6 +242,45 @@ class TestBuildSettings:
         # Assert
         assert settings.buffer_api_key.get_secret_value() == "ssm-buffer-key"
         assert settings.supabase_service_role_key.get_secret_value() == "ssm-role-key"
+        # SCHEDULER_API_KEY isn't in this fixture's values -> optional,
+        # resolves to None rather than raising (see below).
+        assert settings.scheduler_api_key is None
+        assert fake_client.calls == [
+            "/sizuru/BUFFER_API_KEY",
+            "/sizuru/SUPABASE_SERVICE_ROLE_KEY",
+            "/sizuru/SCHEDULER_API_KEY",
+        ]
+
+    def test_include_scheduler_key_false_never_requests_it_from_ssm(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange: SyncFunction has no IAM grant for SCHEDULER_API_KEY (only
+        # ApiFunction does — it's the only Lambda that ever serves
+        # /schedule/* routes) — build_settings(include_scheduler_key=False)
+        # must not even attempt the GetParameter call, regardless of
+        # whether that call would succeed, 404, or AccessDenied (the actual
+        # production incident: an unhandled AccessDenied crashed every
+        # SyncFunction invocation from the moment SCHEDULER_API_KEY was
+        # first introduced).
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("SSM_PREFIX", "/sizuru/")
+        monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
+        monkeypatch.delenv("BUFFER_API_KEY", raising=False)
+        monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
+        fake_client = _FakeSsmClient(
+            {
+                "/sizuru/BUFFER_API_KEY": "ssm-buffer-key",
+                "/sizuru/SUPABASE_SERVICE_ROLE_KEY": "ssm-role-key",
+            }
+        )
+        monkeypatch.setattr(factory.boto3, "client", lambda service: fake_client)
+        factory._ssm_cache.clear()
+
+        # Act
+        settings = build_settings(include_scheduler_key=False)
+
+        # Assert
+        assert settings.scheduler_api_key is None
         assert fake_client.calls == [
             "/sizuru/BUFFER_API_KEY",
             "/sizuru/SUPABASE_SERVICE_ROLE_KEY",
@@ -220,6 +312,7 @@ class TestBuildSettings:
             {
                 "/sizuru-multi-build/BUFFER_API_KEY": "key",
                 "/sizuru-multi-build/SUPABASE_SERVICE_ROLE_KEY": "role",
+                "/sizuru-multi-build/SCHEDULER_API_KEY": "scheduler-key",
             }
         )
         monkeypatch.setattr(factory.boto3, "client", lambda service: fake_client)
@@ -233,7 +326,34 @@ class TestBuildSettings:
         assert fake_client.calls == [
             "/sizuru-multi-build/BUFFER_API_KEY",
             "/sizuru-multi-build/SUPABASE_SERVICE_ROLE_KEY",
+            "/sizuru-multi-build/SCHEDULER_API_KEY",
         ]
+
+    def test_missing_optional_scheduler_key_is_retried_every_call_not_cached(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Arrange: unlike a found value, "not found" isn't cached — a
+        # parameter created after this container started warm should be
+        # picked up without waiting for a cold start.
+        monkeypatch.setenv("SSM_PREFIX", "/sizuru-optional-test/")
+        monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
+        fake_client = _FakeSsmClient(
+            {
+                "/sizuru-optional-test/BUFFER_API_KEY": "key",
+                "/sizuru-optional-test/SUPABASE_SERVICE_ROLE_KEY": "role",
+            }
+        )
+        monkeypatch.setattr(factory.boto3, "client", lambda service: fake_client)
+        factory._ssm_cache.clear()
+
+        # Act
+        first = build_settings()
+        second = build_settings()
+
+        # Assert
+        assert first.scheduler_api_key is None
+        assert second.scheduler_api_key is None
+        assert fake_client.calls.count("/sizuru-optional-test/SCHEDULER_API_KEY") == 2
 
     def test_ssm_client_error_propagates_clearly_without_a_secret_value(
         self, monkeypatch: pytest.MonkeyPatch

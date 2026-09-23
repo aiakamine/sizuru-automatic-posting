@@ -6,7 +6,10 @@ with in-memory fakes; it never talks to httpx/boto3 directly.
 Idempotency caveat: `publish()` always creates a new submission row for the
 given video file, so re-running `publish()` on the same file publishes it
 again. `retry()` is the supported way to resend only the posts that failed
-for an existing submission.
+for an existing submission. `publish_uploaded()` (the scheduling API's
+entry point) is the exception: it IS idempotent on the video's S3 key, since
+its caller may retry the identical request after a deadline-induced partial
+send (see its docstring).
 """
 
 from __future__ import annotations
@@ -26,9 +29,17 @@ from sizuru_post.adapters.buffer import (
     BufferProtocolError,
     CreatePostResult,
 )
-from sizuru_post.adapters.repo import ChannelRow, PostRow, Repo
+from sizuru_post.adapters.repo import ChannelRow, PostRow, Repo, UniqueViolationError
 from sizuru_post.adapters.storage import StoredObject
-from sizuru_post.domain.models import PostStatus, PublishRequest, Target, Timing, VideoInfo, resolve_timing
+from sizuru_post.domain.models import (
+    PostStatus,
+    PublishRequest,
+    Target,
+    Timing,
+    VideoInfo,
+    resolve_timing,
+    validate_due_at_is_future,
+)
 from sizuru_post.domain.validate import (
     ValidationIssue,
     generate_thumbnail,
@@ -135,7 +146,6 @@ class PublishReport:
     results: list[TargetResult]
 
 
-_SETTLED_STATUSES = (PostStatus.SCHEDULED, PostStatus.SENT, PostStatus.DRAFT)
 _EDITABLE_STATUSES = (PostStatus.SCHEDULED, PostStatus.DRAFT)
 _NEAR_DUE_GUARD = timedelta(minutes=5)
 
@@ -211,9 +221,18 @@ class Publisher:
     # --- planning (no side effects) -----------------------------------------
 
     def plan(self, request: PublishRequest) -> PublishPlan:
+        """Plan a request whose video is a local file (the CLI's path):
+        probes it, then delegates to plan_with_video."""
+        assert request.video_path is not None  # noqa: S101 - CLI rejects None before this point
         video = self._probe(request.video_path)
-        channels = self._repo.list_channels()
+        return self.plan_with_video(request, video)
 
+    def plan_with_video(self, request: PublishRequest, video: VideoInfo) -> PublishPlan:
+        """Plan a request whose VideoInfo is already known — either from
+        plan() probing a local file, or from the scheduling API's
+        already-uploaded flow (publish_uploaded), which never has a local
+        file to probe."""
+        channels = self._repo.list_channels()
         planned = [self._plan_target(target, video, channels) for target in request.targets]
         return PublishPlan(request=request, video=video, targets=planned)
 
@@ -233,7 +252,19 @@ class Publisher:
                 if c.buffer_channel_id == target.channel_id and c.service == target.service
             ]
         else:
-            candidates = [c for c in channels if c.service == target.service]
+            # Exclude disconnected channels before the ambiguity check:
+            # when a Buffer channel is replaced (the old row kept with
+            # is_disconnected=True, a new row added for the same service),
+            # the stale disconnected row must not count as a second
+            # candidate and wrongly trip "複数あります" — only the
+            # connected replacement should be picked automatically.
+            matching = [c for c in channels if c.service == target.service]
+            candidates = [c for c in matching if not c.is_disconnected]
+            if not candidates and matching:
+                # every match for this service is disconnected
+                message = f"{target.service}: チャンネルが連携解除されています"
+                issues.append(ValidationIssue(service=target.service, level="error", message=message))
+                return None
 
         if not candidates:
             message = f"{target.service}: 対応するチャンネルが見つかりません"
@@ -260,6 +291,7 @@ class Publisher:
     def publish(self, request: PublishRequest, approved: bool) -> PublishReport:
         if not approved:
             raise ApprovalRequiredError("公開には承認 (approved=True) が必要です")
+        assert request.video_path is not None  # noqa: S101 - CLI rejects None before this point
 
         plan = self.plan(request)
         if not plan.has_valid_target:
@@ -289,8 +321,115 @@ class Publisher:
         ]
         return PublishReport(submission_id=submission_id, results=results)
 
+    def publish_uploaded(
+        self,
+        request: PublishRequest,
+        video: VideoInfo,
+        stored: StoredObject,
+        thumbnail_url: str | None,
+        approved: bool,
+        should_stop: Callable[[], bool] | None = None,
+    ) -> PublishReport:
+        """publish(), but for a video already uploaded out-of-band (the
+        scheduling API's `/schedule/submissions`: the client uploads
+        directly to S3 via a presigned POST, then calls this instead of
+        publish()/upload_video).
+
+        Idempotent on `stored.key` (submissions.s3_key is UNIQUE): a resent
+        request with the same key reuses the existing submission instead of
+        inserting a duplicate. Per target's existing post row (if any):
+          - settled (scheduled/sent/draft) or canceled: returned as-is,
+            never resent, even if this request's caption/due_at differ.
+          - pending: an earlier attempt is still in flight or crashed
+            before hearing back from Buffer — reported "unknown" rather
+            than resent (risk of double-posting).
+          - failed: resent using *this* request's current
+            caption/mode/due_at/platform_options (see _resend_failed_post)
+            — unlike the above, a failed attempt genuinely never reached
+            Buffer, so resending with corrected values is exactly what a
+            "fix the caption and resubmit" flow needs.
+          - none: sent as a brand-new post (_publish_one).
+
+        `should_stop`, once it starts returning True, stops before starting
+        the next un-sent target (i.e. one with no row, or a failed one
+        about to be resent); those are reported "not_attempted" so the
+        caller can safely resend the identical request (see api/_deadline).
+        An already-settled/pending/canceled target keeps reporting its
+        real status regardless of should_stop — it was never going to be
+        sent this invocation anyway.
+        """
+        if not approved:
+            raise ApprovalRequiredError("公開には承認 (approved=True) が必要です")
+
+        plan = self.plan_with_video(request, video)
+        if not plan.has_valid_target:
+            return PublishReport(submission_id=None, results=[self._skipped_result(t) for t in plan.targets])
+
+        submission_id = self._claim_submission(request, stored, thumbnail_url, plan.video)
+
+        results: list[TargetResult] = []
+        for planned in plan.targets:
+            if not planned.is_valid:
+                results.append(self._skipped_result(planned))
+                continue
+            channel = planned.channel
+            assert channel is not None  # noqa: S101 - guaranteed by is_valid
+
+            existing = self._find_existing_post(submission_id, channel.id)
+            if existing is not None and existing.status != PostStatus.FAILED:
+                # settled/pending/canceled: report the real status as-is,
+                # BEFORE consulting should_stop — never relabeled
+                # "not_attempted" just because the deadline is tight on
+                # *this* invocation, and never touched by this request's
+                # (possibly different) caption/due_at.
+                results.append(self._existing_post_result(existing, planned.target.service, planned.issues))
+                continue
+
+            if should_stop is not None and should_stop():
+                results.append(
+                    TargetResult(
+                        service=planned.target.service, status="not_attempted", issues=planned.issues
+                    )
+                )
+            elif existing is None:
+                results.append(self._publish_one(request, planned, submission_id, stored.public_url))
+            else:
+                results.append(self._resend_failed_post(request, planned, existing, stored.public_url))
+        return PublishReport(submission_id=submission_id, results=results)
+
+    def _claim_submission(
+        self, request: PublishRequest, stored: StoredObject, thumbnail_url: str | None, video: VideoInfo
+    ) -> UUID:
+        """The submission-level half of publish_uploaded's idempotency:
+        check-then-insert on `stored.key`, with a fallback re-fetch if a
+        concurrent request won the INSERT race in between (submissions.s3_key
+        is UNIQUE — Repo.create_submission raises UniqueViolationError for
+        that specific case, never a generic 500)."""
+        existing_submission = self._repo.get_submission_by_s3_key(stored.key)
+        if existing_submission is not None:
+            return existing_submission.id
+
+        try:
+            return self._repo.create_submission(
+                title=request.title,
+                s3_key=stored.key,
+                video_url=stored.public_url,
+                thumbnail_url=thumbnail_url,
+                duration_sec=video.duration_sec,
+                approved_at=datetime.now(UTC),
+            )
+        except UniqueViolationError:
+            existing_submission = self._repo.get_submission_by_s3_key(stored.key)
+            assert existing_submission is not None  # noqa: S101 - the violation guarantees a row now exists
+            return existing_submission.id
+
     def _make_thumbnail_url(self, request: PublishRequest) -> str | None:
-        """Best-effort JPEG thumbnail; failures must never block posting."""
+        """Best-effort JPEG thumbnail; failures must never block posting.
+
+        Only called from publish() (a local-file request), never from
+        publish_uploaded() (which receives its thumbnail_url pre-made).
+        """
+        assert request.video_path is not None  # noqa: S101 - guaranteed by publish()'s own assert
         try:
             with tempfile.TemporaryDirectory() as tmp_dir:
                 thumb_path = Path(tmp_dir) / "thumbnail.jpg"
@@ -313,6 +452,42 @@ class Publisher:
     def _skipped_result(self, planned: PlannedTarget) -> TargetResult:
         return TargetResult(service=planned.target.service, status="skipped", issues=planned.issues)
 
+    def _find_existing_post(self, submission_id: UUID, channel_id: UUID) -> PostRow | None:
+        """The post row already created for this (submission, channel), if
+        any — used both by _publish_one (to decide whether to actually
+        call Buffer) and by publish_uploaded's should_stop loop (to report
+        an already-settled/pending target's real status instead of
+        "not_attempted")."""
+        return next(
+            (p for p in self._repo.list_posts_by_submission(submission_id) if p.channel_id == channel_id),
+            None,
+        )
+
+    @staticmethod
+    def _existing_post_result(existing: PostRow, service: str, issues: list[ValidationIssue]) -> TargetResult:
+        if existing.status != PostStatus.PENDING:
+            # Settled (scheduled/sent/draft) — nothing to do. A stray
+            # failed/canceled row here only happens via publish_uploaded's
+            # idempotent resend (publish() always starts from a fresh
+            # submission, so it never sees this); report it as-is rather
+            # than blindly resending.
+            return TargetResult(
+                service=service,
+                status=existing.status.value,
+                post_id=existing.id,
+                buffer_post_id=existing.buffer_post_id,
+                issues=issues,
+            )
+        # Still pending: an earlier attempt (a resent scheduling request —
+        # see publish_uploaded) crashed between creating this row and
+        # hearing back from Buffer. Same ambiguity as BufferAmbiguousError
+        # below — Buffer may or may not have created the post — so report
+        # "unknown" instead of resending, which could double-post.
+        message = "送信結果が不明です。Bufferの画面で投稿の有無を確認してください"
+        return TargetResult(
+            service=service, status="unknown", post_id=existing.id, error=message, issues=issues
+        )
+
     def _publish_one(
         self, request: PublishRequest, planned: PlannedTarget, submission_id: UUID, video_url: str
     ) -> TargetResult:
@@ -321,20 +496,13 @@ class Publisher:
         assert channel is not None  # noqa: S101 - guaranteed by is_valid check
         timing = resolve_timing(request, target)
 
-        existing = next(
-            (p for p in self._repo.list_posts_by_submission(submission_id) if p.channel_id == channel.id),
-            None,
-        )
-        if existing is not None and existing.status in _SETTLED_STATUSES:
-            return TargetResult(
-                service=target.service,
-                status=existing.status.value,
-                post_id=existing.id,
-                buffer_post_id=existing.buffer_post_id,
-                issues=planned.issues,
-            )
-
-        row = self._repo.upsert_post_pending(
+        # Atomic claim (ON CONFLICT DO NOTHING — see
+        # Repo.claim_pending_post): only the caller that actually created
+        # this row proceeds to call Buffer. This is the real safety net
+        # against a double Buffer post from two concurrent identical
+        # requests — publish_uploaded's own pre-check (_find_existing_post)
+        # is advisory/for reporting only, not atomic.
+        row, created = self._repo.claim_pending_post(
             submission_id=submission_id,
             channel_id=channel.id,
             caption=target.caption,
@@ -343,7 +511,84 @@ class Publisher:
             is_draft=request.draft,
             platform_options=_platform_options(request, target),
         )
+        if not created:
+            return self._existing_post_result(row, target.service, planned.issues)
 
+        return self._send_to_buffer(request, target, channel, video_url, row.id, planned.issues)
+
+    def _resend_failed_post(
+        self, request: PublishRequest, planned: PlannedTarget, existing: PostRow, video_url: str
+    ) -> TargetResult:
+        """Resend a target whose existing post row is `failed`, using
+        *this* request's current caption/mode/due_at/platform_options —
+        per publish_uploaded's contract, a failed attempt never reached
+        Buffer, so a corrected resend should use the corrected values, not
+        replay the stale ones from the original failed attempt.
+
+        Reclaims the specific row via Repo.claim_failed_post (atomic
+        failed->pending, guarded by WHERE status='failed') instead of
+        creating a new one — if a concurrent resend already claimed it
+        first, this reports "unknown" (same ambiguity as an existing
+        pending row) rather than resending twice. claim_failed_post itself
+        only transitions the status; retry_count is bumped here (same
+        pattern as _retry_one) via _send_to_buffer's extra_update_fields.
+        """
+        target = planned.target
+        channel = planned.channel
+        assert channel is not None  # noqa: S101 - guaranteed by is_valid check
+        timing = resolve_timing(request, target)
+
+        claimed = self._repo.claim_failed_post(existing.id)
+        if claimed is None:
+            message = "送信結果が不明です。Bufferの画面で投稿の有無を確認してください"
+            return TargetResult(
+                service=target.service,
+                status="unknown",
+                post_id=existing.id,
+                error=message,
+                issues=planned.issues,
+            )
+
+        self._repo.update_post(
+            claimed.id,
+            caption=target.caption,
+            mode=timing.mode,
+            due_at=timing.due_at,
+            platform_options=_platform_options(request, target),
+        )
+        return self._send_to_buffer(
+            request,
+            target,
+            channel,
+            video_url,
+            claimed.id,
+            planned.issues,
+            extra_update_fields={"retry_count": claimed.retry_count + 1},
+        )
+
+    def _send_to_buffer(
+        self,
+        request: PublishRequest,
+        target: Target,
+        channel: ChannelRow,
+        video_url: str,
+        row_id: UUID,
+        issues: list[ValidationIssue],
+        *,
+        extra_update_fields: dict[str, Any] | None = None,
+    ) -> TargetResult:
+        """Dispatch `target`'s createPost mutation and record the outcome
+        against `row_id` — the part _publish_one (a freshly-claimed
+        pending row) and _resend_failed_post (a reclaimed failed row)
+        both need identically, once each has its own row ready.
+
+        `extra_update_fields` are merged into every update_post() call
+        regardless of outcome — _resend_failed_post uses this to bump
+        retry_count (mirroring _retry_one's identical pattern), since
+        claim_failed_post itself only transitions failed->pending and
+        doesn't touch it.
+        """
+        extra = extra_update_fields or {}
         try:
             result = self._buffer.create_post(request, target, channel.buffer_channel_id, video_url)
         except (BufferAmbiguousError, BufferProtocolError):
@@ -354,27 +599,28 @@ class Publisher:
             # failed, which would invite an unsafe blind retry) and surface
             # "unknown" so a human checks Buffer.
             message = "送信結果が不明です。Bufferの画面で投稿の有無を確認してください"
-            self._repo.update_post(row.id, error_message=message)
+            self._repo.update_post(row_id, error_message=message, **extra)
             return TargetResult(
-                service=target.service, status="unknown", post_id=row.id, error=message, issues=planned.issues
+                service=target.service, status="unknown", post_id=row_id, error=message, issues=issues
             )
         except Exception as exc:  # noqa: BLE001 - one target's failure must not abort the others
-            self._repo.update_post(row.id, status=PostStatus.FAILED, error_message=str(exc))
+            self._repo.update_post(row_id, status=PostStatus.FAILED, error_message=str(exc), **extra)
             return TargetResult(
-                service=target.service, status="failed", post_id=row.id, error=str(exc), issues=planned.issues
+                service=target.service, status="failed", post_id=row_id, error=str(exc), issues=issues
             )
 
         if not result.ok:
             error = _error_message(result.error)
-            self._repo.update_post(row.id, status=PostStatus.FAILED, error_message=error)
+            self._repo.update_post(row_id, status=PostStatus.FAILED, error_message=error, **extra)
             return TargetResult(
-                service=target.service, status="failed", post_id=row.id, error=error, issues=planned.issues
+                service=target.service, status="failed", post_id=row_id, error=error, issues=issues
             )
 
         status = self._map_buffer_status(result.status, request.draft)
         update_fields = self._success_update_fields(status, result)
+        update_fields.update(extra)
         return self._apply_success_update(
-            row.id, update_fields, service=target.service, result=result, issues=planned.issues
+            row_id, update_fields, service=target.service, result=result, issues=issues
         )
 
     @staticmethod
@@ -500,7 +746,7 @@ class Publisher:
             )
 
         try:
-            request, target = self._rebuild_retry_request(post, channel, video_url)
+            request, target = self._rebuild_retry_request(post, channel)
         except Exception as exc:  # noqa: BLE001 - a bad stored row must not abort the other posts
             message = f"再送信データの復元に失敗しました: {exc}"
             self._repo.update_post(
@@ -561,11 +807,13 @@ class Publisher:
         )
 
     @staticmethod
-    def _rebuild_retry_request(
-        post: PostRow, channel: ChannelRow, video_url: str
-    ) -> tuple[PublishRequest, Target]:
+    def _rebuild_retry_request(post: PostRow, channel: ChannelRow) -> tuple[PublishRequest, Target]:
         """Reconstruct the Target/PublishRequest needed to rebuild the Buffer
         payload from what was persisted at first-publish time.
+
+        video_path is left None: the Buffer adapter builds its payload from
+        the video_url passed separately to create_post(), never from
+        request.video_path (see domain/models.PublishRequest).
 
         due_at is only set for customScheduled: Timing rejects a due_at on
         any other mode, and addToQueue/shareNow posts can have a due_at
@@ -587,7 +835,7 @@ class Publisher:
             else Timing(mode=post.mode)
         )
         request = PublishRequest(
-            video_path=Path(video_url),
+            video_path=None,
             timing=timing,
             targets=[target],
             draft=post.is_draft,
@@ -612,10 +860,9 @@ class Publisher:
                 raise RequestValidationError("; ".join(i.message for i in errors))
 
         if due_at is not None:
-            if due_at.tzinfo is None:
-                raise RequestValidationError("due_at はタイムゾーン情報を含む必要があります")
-            if due_at <= datetime.now(UTC):
-                raise RequestValidationError("due_at は未来の日時を指定してください")
+            error = validate_due_at_is_future(due_at)
+            if error is not None:
+                raise RequestValidationError(error)
 
         assert post.buffer_post_id is not None  # noqa: S101 - guaranteed by _EDITABLE_STATUSES + DB CHECK
         # BufferAmbiguousError/BufferProtocolError propagate as-is (not

@@ -2,6 +2,7 @@
 
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 import pytest
@@ -12,7 +13,8 @@ from sizuru_post.adapters.buffer import (
     BufferProtocolError,
     CreatePostResult,
 )
-from sizuru_post.adapters.repo import ChannelRow
+from sizuru_post.adapters.repo import ChannelRow, UniqueViolationError
+from sizuru_post.adapters.storage import StoredObject
 from sizuru_post.domain.models import PostStatus, PublishRequest, Target, Timing, VideoInfo
 from sizuru_post.publisher import ApprovalRequiredError, Publisher, RequestValidationError
 from tests.fakes import FakeBuffer, FakeStorage, InMemoryRepo
@@ -422,6 +424,434 @@ class TestPublishIdempotency:
         assert second_result.status == "scheduled"
 
 
+class _RepoRacingCreateSubmission:
+    """Wraps a Repo and simulates a concurrent request winning the
+    create_submission() race for one specific s3_key: the first call for
+    that key seeds the row directly (as if another request had just
+    inserted it) then raises UniqueViolationError, instead of actually
+    inserting through the normal path — same observable effect as two
+    real concurrent inserts racing on the DB's UNIQUE constraint."""
+
+    def __init__(self, inner: InMemoryRepo, race_for_s3_key: str) -> None:
+        self._inner = inner
+        self._race_for = race_for_s3_key
+        self.create_submission_calls = 0
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._inner, name)
+
+    def create_submission(self, *, s3_key: str, **kwargs: Any) -> object:
+        self.create_submission_calls += 1
+        if s3_key == self._race_for:
+            self._inner.create_submission(s3_key=s3_key, **kwargs)  # the "other" request's winning insert
+            raise UniqueViolationError(f"s3_key は一意である必要があります（重複）: {s3_key}")
+        return self._inner.create_submission(s3_key=s3_key, **kwargs)
+
+
+class _RepoClaimFailedAlwaysLoses:
+    """Wraps a Repo and makes claim_failed_post() always report "another
+    caller already claimed it" (returns None), regardless of the row's
+    real status — simulates a concurrent resend winning the race."""
+
+    def __init__(self, inner: InMemoryRepo) -> None:
+        self._inner = inner
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._inner, name)
+
+    def claim_failed_post(self, post_id: object) -> None:
+        return None
+
+
+class TestPublishUploaded:
+    """publish_uploaded(): the scheduling API's entry point for a video
+    already uploaded to S3 out-of-band (see api/schedule.py)."""
+
+    def test_publishes_all_valid_targets_and_creates_submission(
+        self, publisher: Publisher, repo: InMemoryRepo
+    ) -> None:
+        # Arrange
+        request = _request(_targets("tiktok", "x"))
+        stored = StoredObject(
+            key="public/videos/2026/01/abc.mp4", public_url="https://cdn.example.com/abc.mp4"
+        )
+
+        # Act
+        report = publisher.publish_uploaded(
+            request, VALID_VIDEO, stored, "https://cdn.example.com/abc.jpg", approved=True
+        )
+
+        # Assert
+        assert report.submission_id is not None
+        assert {r.service: r.status for r in report.results} == {"tiktok": "scheduled", "x": "scheduled"}
+        submission = repo.get_submission(report.submission_id)
+        assert submission is not None
+        assert submission.s3_key == stored.key
+        assert submission.thumbnail_url == "https://cdn.example.com/abc.jpg"
+
+    def test_not_approved_raises_and_performs_no_side_effects(
+        self, publisher: Publisher, buffer: FakeBuffer, repo: InMemoryRepo
+    ) -> None:
+        # Arrange
+        request = _request(_targets("x"))
+        stored = StoredObject(
+            key="public/videos/2026/01/def.mp4", public_url="https://cdn.example.com/def.mp4"
+        )
+
+        # Act / Assert
+        with pytest.raises(ApprovalRequiredError):
+            publisher.publish_uploaded(request, VALID_VIDEO, stored, None, approved=False)
+        assert buffer.calls == []
+        assert repo.get_submission_by_s3_key(stored.key) is None
+
+    def test_resend_with_same_s3_key_reuses_submission_and_does_not_resend_settled_target(
+        self, publisher: Publisher, buffer: FakeBuffer
+    ) -> None:
+        # Arrange: the client resends the identical request (e.g. after a
+        # client-side timeout) — this must not double-post or double-insert.
+        request = _request(_targets("x"))
+        stored = StoredObject(
+            key="public/videos/2026/01/ghi.mp4", public_url="https://cdn.example.com/ghi.mp4"
+        )
+        first = publisher.publish_uploaded(request, VALID_VIDEO, stored, None, approved=True)
+
+        # Act
+        second = publisher.publish_uploaded(request, VALID_VIDEO, stored, None, approved=True)
+
+        # Assert
+        assert second.submission_id == first.submission_id
+        assert second.results[0].status == "scheduled"
+        assert len(buffer.calls) == 1
+
+    def test_scheduled_target_with_different_caption_in_resend_stays_unchanged(
+        self, publisher: Publisher, buffer: FakeBuffer, repo: InMemoryRepo
+    ) -> None:
+        # Arrange: an already-settled target's row must never be silently
+        # rewritten by a resend, even if the request's caption changed —
+        # only `failed` rows are resent with new values (see
+        # test_failed_target_is_resent_with_new_caption_and_due_at).
+        stored = StoredObject(
+            key="public/videos/2026/01/yz3.mp4", public_url="https://cdn.example.com/yz3.mp4"
+        )
+        first_request = _request([Target(service="x", caption="original caption")])
+        first = publisher.publish_uploaded(first_request, VALID_VIDEO, stored, None, approved=True)
+        assert first.results[0].status == "scheduled"
+
+        second_request = _request([Target(service="x", caption="a completely different caption")])
+
+        # Act
+        second = publisher.publish_uploaded(second_request, VALID_VIDEO, stored, None, approved=True)
+
+        # Assert
+        assert second.results[0].status == "scheduled"
+        assert len(buffer.calls) == 1
+        row = next(
+            p
+            for p in repo.list_posts_by_submission(second.submission_id)  # type: ignore[arg-type]
+            if p.id == second.results[0].post_id
+        )
+        assert row.caption == "original caption"
+
+    def test_failed_target_is_resent_with_new_caption_and_due_at(
+        self, publisher: Publisher, buffer: FakeBuffer, repo: InMemoryRepo
+    ) -> None:
+        # Arrange: the first attempt fails.
+        buffer.results["x"] = CreatePostResult(ok=False, error="temporary error")
+        stored = StoredObject(
+            key="public/videos/2026/01/yz1.mp4", public_url="https://cdn.example.com/yz1.mp4"
+        )
+        first_request = _request([Target(service="x", caption="original caption")])
+        first = publisher.publish_uploaded(first_request, VALID_VIDEO, stored, None, approved=True)
+        assert first.results[0].status == "failed"
+
+        # Act: resend with a new caption and due_at, Buffer now succeeding.
+        buffer.results["x"] = CreatePostResult(ok=True, post_id="post-x-2", status="scheduled")
+        new_due_at = _future(7200)
+        second_target = Target(
+            service="x", caption="brand new caption", timing=Timing(mode="customScheduled", due_at=new_due_at)
+        )
+        second_request = _request([second_target])
+        second = publisher.publish_uploaded(second_request, VALID_VIDEO, stored, None, approved=True)
+
+        # Assert: same row reused (not a new one), with the new values.
+        assert second.submission_id == first.submission_id
+        assert second.results[0].status == "scheduled"
+        assert second.results[0].post_id == first.results[0].post_id
+        assert buffer.requests[-1].targets[0].caption == "brand new caption"
+        row = next(
+            p
+            for p in repo.list_posts_by_submission(second.submission_id)  # type: ignore[arg-type]
+            if p.id == second.results[0].post_id
+        )
+        assert row.caption == "brand new caption"
+        assert row.due_at == new_due_at
+        assert row.retry_count == 1
+
+    def test_failed_target_claim_race_reports_unknown_without_resending(
+        self, buffer: FakeBuffer, repo: InMemoryRepo
+    ) -> None:
+        # Arrange: a failed post row already exists (an earlier attempt).
+        stored = StoredObject(
+            key="public/videos/2026/01/yz2.mp4", public_url="https://cdn.example.com/yz2.mp4"
+        )
+        x_channel = next(c for c in repo.list_channels() if c.service == "x")
+        submission_id = repo.create_submission(
+            title=None,
+            s3_key=stored.key,
+            video_url=stored.public_url,
+            thumbnail_url=None,
+            duration_sec=VALID_VIDEO.duration_sec,
+            approved_at=FIXED_NOW,
+        )
+        row, _created = repo.claim_pending_post(
+            submission_id=submission_id,
+            channel_id=x_channel.id,
+            caption="old caption",
+            mode="customScheduled",
+            due_at=_future(),
+            is_draft=False,
+            platform_options={},
+        )
+        repo.update_post(row.id, status=PostStatus.FAILED, error_message="boom")
+
+        # A concurrent resend wins the claim_failed_post race first.
+        racing_repo = _RepoClaimFailedAlwaysLoses(repo)
+        racing_publisher = Publisher(
+            buffer=buffer,
+            storage=FakeStorage(),
+            repo=racing_repo,  # type: ignore[arg-type]
+            probe=lambda path: VALID_VIDEO,  # type: ignore[arg-type]
+            clock=lambda: FIXED_NOW,
+        )
+        request = _request([Target(service="x", caption="new caption")])
+
+        # Act
+        report = racing_publisher.publish_uploaded(request, VALID_VIDEO, stored, None, approved=True)
+
+        # Assert
+        assert report.results[0].status == "unknown"
+        assert report.results[0].post_id == row.id
+        assert buffer.calls == []
+
+    def test_canceled_target_is_reported_as_is_and_never_resent(
+        self, publisher: Publisher, buffer: FakeBuffer, repo: InMemoryRepo
+    ) -> None:
+        # Arrange: cancel the settled post from the first attempt (e.g. via
+        # the admin dashboard), then resend the identical request.
+        stored = StoredObject(
+            key="public/videos/2026/01/yz4.mp4", public_url="https://cdn.example.com/yz4.mp4"
+        )
+        first_request = _request([Target(service="x", caption="original caption")])
+        first = publisher.publish_uploaded(first_request, VALID_VIDEO, stored, None, approved=True)
+        assert first.results[0].status == "scheduled"
+        repo.update_post(first.results[0].post_id, status=PostStatus.CANCELED)  # type: ignore[arg-type]
+
+        second_request = _request([Target(service="x", caption="a different caption")])
+
+        # Act
+        second = publisher.publish_uploaded(second_request, VALID_VIDEO, stored, None, approved=True)
+
+        # Assert
+        assert second.results[0].status == "canceled"
+        assert second.results[0].post_id == first.results[0].post_id
+        assert len(buffer.calls) == 1  # only the original send — never resent
+        row = next(
+            p
+            for p in repo.list_posts_by_submission(second.submission_id)  # type: ignore[arg-type]
+            if p.id == second.results[0].post_id
+        )
+        assert row.caption == "original caption"
+
+    def test_create_submission_race_falls_back_to_the_winning_row(
+        self, buffer: FakeBuffer, storage: FakeStorage, repo: InMemoryRepo
+    ) -> None:
+        # Arrange: a concurrent request wins the create_submission() race
+        # for this s3_key between our own get_submission_by_s3_key() check
+        # and our own insert attempt — the request must still complete
+        # successfully against the winner's row, not fail outright.
+        stored = StoredObject(
+            key="public/videos/2026/01/vwx.mp4", public_url="https://cdn.example.com/vwx.mp4"
+        )
+        racing_repo = _RepoRacingCreateSubmission(repo, race_for_s3_key=stored.key)
+        racing_publisher = Publisher(
+            buffer=buffer,
+            storage=storage,
+            repo=racing_repo,  # type: ignore[arg-type]
+            probe=lambda path: VALID_VIDEO,  # type: ignore[arg-type]
+            clock=lambda: FIXED_NOW,
+        )
+        request = _request(_targets("x"))
+
+        # Act
+        report = racing_publisher.publish_uploaded(request, VALID_VIDEO, stored, None, approved=True)
+
+        # Assert
+        winning_submission = repo.get_submission_by_s3_key(stored.key)
+        assert winning_submission is not None
+        assert report.submission_id == winning_submission.id
+        assert report.results[0].status == "scheduled"
+        assert racing_repo.create_submission_calls == 1
+
+    def test_existing_pending_post_is_not_resent_and_reported_unknown(
+        self, publisher: Publisher, buffer: FakeBuffer, repo: InMemoryRepo, channels: list[ChannelRow]
+    ) -> None:
+        # Arrange: simulate a prior attempt that crashed after creating the
+        # pending row but before hearing back from Buffer — resending here
+        # would risk double-posting, since we don't know if Buffer already
+        # created it.
+        x_channel = next(c for c in channels if c.service == "x")
+        due_at = _future()
+        submission_id = repo.create_submission(
+            title=None,
+            s3_key="public/videos/2026/01/jkl.mp4",
+            video_url="https://cdn.example.com/jkl.mp4",
+            thumbnail_url=None,
+            duration_sec=VALID_VIDEO.duration_sec,
+            approved_at=FIXED_NOW,
+        )
+        repo.claim_pending_post(
+            submission_id=submission_id,
+            channel_id=x_channel.id,
+            caption="hello",
+            mode="customScheduled",
+            due_at=due_at,
+            is_draft=False,
+            platform_options={},
+        )
+        target = Target(service="x", caption="hello", timing=Timing(mode="customScheduled", due_at=due_at))
+        request = _request([target])
+        stored = StoredObject(
+            key="public/videos/2026/01/jkl.mp4", public_url="https://cdn.example.com/jkl.mp4"
+        )
+
+        # Act
+        report = publisher.publish_uploaded(request, VALID_VIDEO, stored, None, approved=True)
+
+        # Assert
+        assert report.submission_id == submission_id
+        assert report.results[0].status == "unknown"
+        assert buffer.calls == []
+
+    def test_should_stop_marks_all_remaining_targets_not_attempted_without_sending(
+        self, publisher: Publisher, buffer: FakeBuffer
+    ) -> None:
+        # Arrange
+        request = _request(_targets("tiktok", "x"))
+        stored = StoredObject(
+            key="public/videos/2026/01/mno.mp4", public_url="https://cdn.example.com/mno.mp4"
+        )
+
+        # Act
+        report = publisher.publish_uploaded(
+            request, VALID_VIDEO, stored, None, approved=True, should_stop=lambda: True
+        )
+
+        # Assert
+        assert {r.service: r.status for r in report.results} == {
+            "tiktok": "not_attempted",
+            "x": "not_attempted",
+        }
+        assert buffer.calls == []
+
+    def test_should_stop_trips_after_first_target_leaves_remaining_not_attempted(
+        self, publisher: Publisher, buffer: FakeBuffer
+    ) -> None:
+        # Arrange: should_stop only starts returning True once the first
+        # target has already been sent.
+        request = _request(_targets("tiktok", "x"))
+        stored = StoredObject(
+            key="public/videos/2026/01/pqr.mp4", public_url="https://cdn.example.com/pqr.mp4"
+        )
+        calls = 0
+
+        def _should_stop() -> bool:
+            nonlocal calls
+            calls += 1
+            return calls > 1
+
+        # Act
+        report = publisher.publish_uploaded(
+            request, VALID_VIDEO, stored, None, approved=True, should_stop=_should_stop
+        )
+
+        # Assert
+        results = {r.service: r.status for r in report.results}
+        assert results["tiktok"] == "scheduled"
+        assert results["x"] == "not_attempted"
+        assert len(buffer.calls) == 1
+
+    def test_should_stop_does_not_mark_an_already_settled_target_not_attempted(
+        self, publisher: Publisher, buffer: FakeBuffer
+    ) -> None:
+        # Arrange: a resent request where "x" was already scheduled by an
+        # earlier (partial) attempt — should_stop tripping on THIS request
+        # must not relabel that already-settled row as "not_attempted";
+        # only "tiktok" (which really wasn't sent) should be.
+        stored = StoredObject(
+            key="public/videos/2026/01/stu.mp4", public_url="https://cdn.example.com/stu.mp4"
+        )
+        first_request = _request(_targets("x"))
+        publisher.publish_uploaded(first_request, VALID_VIDEO, stored, None, approved=True)
+        assert len(buffer.calls) == 1
+
+        second_request = _request(_targets("tiktok", "x"))
+
+        # Act
+        report = publisher.publish_uploaded(
+            second_request, VALID_VIDEO, stored, None, approved=True, should_stop=lambda: True
+        )
+
+        # Assert
+        results = {r.service: r.status for r in report.results}
+        assert results["x"] == "scheduled"
+        assert results["tiktok"] == "not_attempted"
+        assert len(buffer.calls) == 1  # no second call for "x"
+
+    def test_resend_handles_settled_failed_and_missing_targets_independently_in_one_request(
+        self, publisher: Publisher, buffer: FakeBuffer, repo: InMemoryRepo
+    ) -> None:
+        # Arrange: a first attempt at two targets where "x" succeeds
+        # (settled) and "tiktok" fails; "instagram" is added only on the
+        # resend (so it has no row at all yet). One publish_uploaded() call
+        # covering all three statuses at once must handle each
+        # independently without any cross-contamination.
+        buffer.results["tiktok"] = CreatePostResult(ok=False, error="temporary error")
+        stored = StoredObject(
+            key="public/videos/2026/01/mix1.mp4", public_url="https://cdn.example.com/mix1.mp4"
+        )
+        first_request = _request(_targets("x", "tiktok"))
+        first = publisher.publish_uploaded(first_request, VALID_VIDEO, stored, None, approved=True)
+        assert {r.service: r.status for r in first.results} == {"x": "scheduled", "tiktok": "failed"}
+        buffer.calls.clear()
+        buffer.results["tiktok"] = CreatePostResult(ok=True, post_id="post-tiktok-2", status="scheduled")
+
+        second_request = _request(
+            [
+                Target(service="x", caption="a different caption for the settled one"),
+                Target(service="tiktok", caption="corrected tiktok caption"),
+                Target(service="instagram", caption="brand new instagram target"),
+            ]
+        )
+
+        # Act
+        second = publisher.publish_uploaded(second_request, VALID_VIDEO, stored, None, approved=True)
+
+        # Assert: each target resolved independently.
+        results = {r.service: r.status for r in second.results}
+        assert results == {"x": "scheduled", "tiktok": "scheduled", "instagram": "scheduled"}
+        assert second.submission_id == first.submission_id
+        # settled "x" was never touched again by Buffer.
+        assert [c[0] for c in buffer.calls].count("x") == 0
+        assert [c[0] for c in buffer.calls].count("tiktok") == 1
+        assert [c[0] for c in buffer.calls].count("instagram") == 1
+        x_row = next(
+            p
+            for p in repo.list_posts_by_submission(second.submission_id)  # type: ignore[arg-type]
+            if p.id == next(r.post_id for r in second.results if r.service == "x")
+        )
+        assert x_row.caption == "hello"  # unchanged from the first request's default caption
+
+
 class TestPublishApprovalAndUploadFailure:
     def test_not_approved_raises_and_performs_no_side_effects(
         self, publisher: Publisher, buffer: FakeBuffer, storage: FakeStorage, repo: InMemoryRepo
@@ -534,6 +964,68 @@ class TestPlan:
         repo = InMemoryRepo(channels=[_channel("x", is_disconnected=True)])
         publisher = Publisher(buffer=buffer, storage=storage, repo=repo, probe=lambda path: VALID_VIDEO)
         request = _request(_targets("x"))
+
+        # Act
+        plan = publisher.plan(request)
+
+        # Assert
+        assert plan.targets[0].channel is None
+        assert any("連携解除" in i.message for i in plan.targets[0].issues)
+
+    def test_old_disconnected_channel_replaced_by_new_connected_channel_resolves_automatically(
+        self, buffer: FakeBuffer, storage: FakeStorage
+    ) -> None:
+        # Arrange: a Buffer channel got replaced — the old row is kept
+        # with is_disconnected=True, and a new row was added for the same
+        # service. Without excluding disconnected rows up front, this
+        # would wrongly look ambiguous ("複数あります") instead of just
+        # picking the one usable (connected) channel automatically.
+        old_disconnected = _channel("x", is_disconnected=True)
+        new_connected = _channel("x")
+        repo = InMemoryRepo(channels=[old_disconnected, new_connected])
+        publisher = Publisher(buffer=buffer, storage=storage, repo=repo, probe=lambda path: VALID_VIDEO)
+        request = _request(_targets("x"))
+
+        # Act
+        plan = publisher.plan(request)
+
+        # Assert
+        assert plan.targets[0].channel is not None
+        assert plan.targets[0].channel.id == new_connected.id
+        assert not any(i.level == "error" for i in plan.targets[0].issues)
+
+    def test_multiple_disconnected_channels_for_service_is_disconnected_error_not_ambiguous(
+        self, buffer: FakeBuffer, storage: FakeStorage
+    ) -> None:
+        # Arrange: every match for this service is disconnected — must
+        # still report "連携解除" (the actionable fix), not "複数あります"
+        # (which would incorrectly suggest passing channel_id helps).
+        repo = InMemoryRepo(
+            channels=[_channel("x", is_disconnected=True), _channel("x", is_disconnected=True)]
+        )
+        publisher = Publisher(buffer=buffer, storage=storage, repo=repo, probe=lambda path: VALID_VIDEO)
+        request = _request(_targets("x"))
+
+        # Act
+        plan = publisher.plan(request)
+
+        # Assert
+        assert plan.targets[0].channel is None
+        assert any("連携解除" in i.message for i in plan.targets[0].issues)
+        assert not any("複数" in i.message for i in plan.targets[0].issues)
+
+    def test_explicit_channel_id_for_disconnected_channel_is_still_disconnected_error(
+        self, buffer: FakeBuffer, storage: FakeStorage
+    ) -> None:
+        # Arrange: with channel_id explicitly given, disconnected channels
+        # are NOT excluded from candidates up front (only the
+        # no-channel_id auto-resolution path does that) — the existing
+        # bottom-of-function disconnected check still applies.
+        disconnected = _channel("x", is_disconnected=True)
+        repo = InMemoryRepo(channels=[disconnected])
+        publisher = Publisher(buffer=buffer, storage=storage, repo=repo, probe=lambda path: VALID_VIDEO)
+        target = Target(service="x", caption="hi", channel_id=disconnected.buffer_channel_id)
+        request = _request([target])
 
         # Act
         plan = publisher.plan(request)
@@ -797,7 +1289,7 @@ class TestSync:
             duration_sec=None,
             approved_at=datetime.now(UTC),
         )
-        repo.upsert_post_pending(
+        repo.claim_pending_post(
             submission_id=submission_id,
             channel_id=channel.id,
             caption="hi",
@@ -1049,6 +1541,30 @@ class TestRetry:
         )
         assert row.platform_options == {"tiktok_title": "My Title"}
         assert row.retry_count == 1
+
+    def test_retry_rebuilds_request_with_video_path_none(
+        self, publisher: Publisher, buffer: FakeBuffer
+    ) -> None:
+        # Arrange: the Buffer adapter builds its payload from the video_url
+        # passed to create_post(), never from request.video_path — retry()
+        # must not fabricate a fake local Path for it (see
+        # Publisher._rebuild_retry_request).
+        buffer.results["x"] = CreatePostResult(ok=False, error="temporary error")
+        request = _request(_targets("x"))
+        first_report = publisher.publish(request, approved=True)
+        submission_id = first_report.submission_id
+        assert submission_id is not None
+
+        buffer.results.pop("x")
+        buffer.calls.clear()
+        buffer.requests.clear()
+
+        # Act
+        publisher.retry(submission_id, approved=True)
+
+        # Assert
+        assert len(buffer.requests) == 1
+        assert buffer.requests[0].video_path is None
 
     def test_retry_without_approval_raises(self, publisher: Publisher) -> None:
         # Act / Assert

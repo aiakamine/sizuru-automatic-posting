@@ -1,12 +1,22 @@
 """Tests for sizuru_post.domain.models: PublishRequest / Timing / Target validation."""
 
+import types
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
-from sizuru_post.domain.models import PostStatus, PublishRequest, Target, Timing, VideoInfo, resolve_timing
+import sizuru_post.domain.models as models_module
+from sizuru_post.domain.models import (
+    PostStatus,
+    PublishRequest,
+    Target,
+    Timing,
+    VideoInfo,
+    resolve_timing,
+    validate_due_at_is_future,
+)
 
 
 def _future(seconds: int = 3600) -> datetime:
@@ -137,6 +147,50 @@ class TestVideoInfo:
         # Assert
         assert info.duration_sec == 12.5
         assert info.audio_codec == "aac"
+
+
+class TestValidateDueAtIsFuture:
+    """Direct unit tests for the shared boundary rule (see its docstring):
+    Timing/Publisher.edit()/api/handler.py/api/schedule.py all wrap this
+    same function's message in their own exception type, so the rule
+    itself only needs to be pinned down once here."""
+
+    def test_naive_datetime_returns_timezone_message(self) -> None:
+        # Arrange
+        naive = datetime(2030, 1, 1)  # noqa: DTZ001
+
+        # Act
+        error = validate_due_at_is_future(naive)
+
+        # Assert
+        assert error == "due_at はタイムゾーン情報を含む必要があります"
+
+    def test_future_datetime_returns_none(self) -> None:
+        # Arrange / Act / Assert
+        assert validate_due_at_is_future(_future()) is None
+
+    def test_exactly_now_is_rejected_as_not_future(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Arrange: due_at == "now" must be rejected — the rule is `<=`, not
+        # `<` (see the function's own `due_at <= datetime.now(UTC)` check).
+        # The wall clock can't reliably land exactly on "now" from the
+        # outside, so the module's `datetime` is patched to a fixed clock.
+        fixed_now = datetime(2030, 6, 15, 12, 0, 0, tzinfo=UTC)
+        monkeypatch.setattr(models_module, "datetime", types.SimpleNamespace(now=lambda tz=None: fixed_now))
+
+        # Act
+        error = validate_due_at_is_future(fixed_now)
+
+        # Assert
+        assert error == "due_at は未来の日時を指定してください"
+
+    def test_one_microsecond_after_now_is_accepted(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Arrange
+        fixed_now = datetime(2030, 6, 15, 12, 0, 0, tzinfo=UTC)
+        monkeypatch.setattr(models_module, "datetime", types.SimpleNamespace(now=lambda tz=None: fixed_now))
+        due_at = fixed_now + timedelta(microseconds=1)
+
+        # Act / Assert
+        assert validate_due_at_is_future(due_at) is None
 
 
 class TestPostStatus:

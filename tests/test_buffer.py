@@ -398,6 +398,119 @@ class TestBufferClientCreatePost:
             client.create_post(request, request.targets[0], "chan-1", "https://cdn/video.mp4")
 
 
+class TestBufferClientRetrySleepCap:
+    """max_retry_sleep_seconds (set for the Lambda-built client — see
+    factory.build_publisher_without_uploads) bounds how long a retry will
+    ever block, so a slow/rate-limited Buffer can't blow the Lambda's own
+    deadline. 429 happens before a mutation is dispatched (see _post's
+    comment), so raising instead of sleeping here is always safe — no
+    createPost/editPost/deletePost has been sent yet."""
+
+    @respx.mock
+    def test_retry_after_exceeding_cap_raises_before_sleeping(self, sleeps: list[float]) -> None:
+        # Arrange
+        client = BufferClient(
+            api_key="test-key", max_retries=4, sleep=sleeps.append, max_retry_sleep_seconds=5.0
+        )
+        respx.post(BUFFER_GRAPHQL_URL).mock(
+            return_value=httpx.Response(429, headers={"Retry-After": "120"})
+        )
+        request = _request()
+
+        # Act / Assert
+        with pytest.raises(BufferRateLimitError):
+            client.create_post(request, request.targets[0], "chan-1", "https://cdn/video.mp4")
+        assert sleeps == []
+
+    @respx.mock
+    def test_retry_after_under_cap_still_sleeps_and_retries(self, sleeps: list[float]) -> None:
+        # Arrange
+        client = BufferClient(
+            api_key="test-key", max_retries=4, sleep=sleeps.append, max_retry_sleep_seconds=5.0
+        )
+        route = respx.post(BUFFER_GRAPHQL_URL)
+        route.side_effect = [
+            httpx.Response(429, headers={"Retry-After": "1"}),
+            httpx.Response(200, json=SUCCESS_RESPONSE),
+        ]
+        request = _request()
+
+        # Act
+        result = client.create_post(request, request.targets[0], "chan-1", "https://cdn/video.mp4")
+
+        # Assert
+        assert result.ok is True
+        assert sleeps == [1.0]
+
+    @respx.mock
+    def test_no_cap_by_default_preserves_current_behavior(self, sleeps: list[float]) -> None:
+        # Arrange: the CLI's client (no cap set) sleeps out the full
+        # Retry-After, same as before this cap existed.
+        client = BufferClient(api_key="test-key", max_retries=1, sleep=sleeps.append)
+        respx.post(BUFFER_GRAPHQL_URL).mock(
+            return_value=httpx.Response(429, headers={"Retry-After": "120"})
+        )
+        request = _request()
+
+        # Act / Assert
+        with pytest.raises(BufferRateLimitError):
+            client.create_post(request, request.targets[0], "chan-1", "https://cdn/video.mp4")
+        assert sleeps == [120.0]
+
+    @respx.mock
+    def test_retry_after_exactly_at_cap_still_sleeps_and_retries(self, sleeps: list[float]) -> None:
+        # Arrange: the guard is `delay > cap`, not `>=` — a delay exactly
+        # equal to the cap must still sleep normally, not raise.
+        client = BufferClient(
+            api_key="test-key", max_retries=4, sleep=sleeps.append, max_retry_sleep_seconds=5.0
+        )
+        route = respx.post(BUFFER_GRAPHQL_URL)
+        route.side_effect = [
+            httpx.Response(429, headers={"Retry-After": "5"}),
+            httpx.Response(200, json=SUCCESS_RESPONSE),
+        ]
+        request = _request()
+
+        # Act
+        result = client.create_post(request, request.targets[0], "chan-1", "https://cdn/video.mp4")
+
+        # Assert
+        assert result.ok is True
+        assert sleeps == [5.0]
+
+    @respx.mock
+    def test_retry_after_just_above_cap_raises_before_sleeping(self, sleeps: list[float]) -> None:
+        # Arrange: the smallest possible overage (cap + 0.001s) must still
+        # raise rather than sleep — the boundary is a strict `>`.
+        client = BufferClient(
+            api_key="test-key", max_retries=4, sleep=sleeps.append, max_retry_sleep_seconds=5.0
+        )
+        respx.post(BUFFER_GRAPHQL_URL).mock(
+            return_value=httpx.Response(429, headers={"Retry-After": "5.001"})
+        )
+        request = _request()
+
+        # Act / Assert
+        with pytest.raises(BufferRateLimitError):
+            client.create_post(request, request.targets[0], "chan-1", "https://cdn/video.mp4")
+        assert sleeps == []
+
+    @respx.mock
+    def test_cap_applies_to_queries_too(self, sleeps: list[float]) -> None:
+        # Arrange
+        client = BufferClient(
+            api_key="test-key", max_retries=4, sleep=sleeps.append, max_retry_sleep_seconds=5.0
+        )
+        respx.post(BUFFER_GRAPHQL_URL).mock(
+            return_value=httpx.Response(429, headers={"Retry-After": "60"})
+        )
+
+        # Act / Assert
+        with pytest.raises(BufferRateLimitError):
+            client.get_post("post-1")
+        assert sleeps == []
+
+
 class TestBufferClientChannelsAndPost:
     @respx.mock
     def test_get_channels_returns_list(self, client: BufferClient) -> None:

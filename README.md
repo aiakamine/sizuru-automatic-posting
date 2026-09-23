@@ -145,6 +145,19 @@ uv run sizuru-post sync
 `edit` / `cancel` は対象の投稿が「予約済み」または「下書き」のときのみ有効で、
 `publish` / `retry` と同様に必ず人間の承認を得てから `--yes` を付けて実行します。
 
+## スケジューリングAPI（sns-schedule スキル向け）
+
+`.claude/skills/sns-schedule` スキルは、このCLIとは別にAWS上のスケジューリングAPI
+（`sizuru_post.api.schedule`、`infra/sam/template.yaml` の `ApiFunction` に相乗り）を
+HTTP経由で叩いて動画のアップロードと予約投稿を行います。認証は共有APIキー1本
+（`x-api-key` ヘッダー、管理画面のSupabase JWTとは完全に別方式）。詳細な運用手順・
+キー発行手順は `infra/sam/README.md` の「Auth: the scheduling API」「Local usage:
+the sns-schedule skill」を参照してください。
+
+- `POST /schedule/uploads` — 動画・サムネイル用の署名付きPOST URLを発行
+- `GET /schedule/posts?from=&to=` — 指定期間内の予約状況（空き枠提案用）
+- `POST /schedule/submissions` — アップロード済み動画からBuffer予約を作成（`dry_run` で検証のみも可）
+
 ## 制約
 
 - **X（無料プラン）は動画尺140秒まで**。超える場合はXを投稿対象から外すか、動画を詰める

@@ -288,6 +288,7 @@ class BufferClient:
         max_retries: int = 4,
         sleep: Callable[[float], None] = time.sleep,
         timeout: float = 30.0,
+        max_retry_sleep_seconds: float | None = None,
     ) -> None:
         self._api_key = api_key
         # `timeout` only applies when we build the internal client ourselves;
@@ -295,6 +296,11 @@ class BufferClient:
         self._http = http or httpx.Client(timeout=timeout)
         self._max_retries = max_retries
         self._sleep = sleep
+        # None (the CLI's default) = unbounded, today's behavior. Set for
+        # the Lambda-built client (factory.build_publisher_without_uploads)
+        # so a long Retry-After can't blow the invocation's own deadline —
+        # see _sleep_or_raise.
+        self._max_retry_sleep_seconds = max_retry_sleep_seconds
 
     def create_post(
         self,
@@ -440,7 +446,7 @@ class BufferClient:
                 attempt += 1
                 if attempt > self._max_retries:
                     raise BufferTransportError(f"Buffer APIへの接続に失敗しました: {exc}") from exc
-                self._sleep(self._backoff_seconds(attempt))
+                self._sleep_or_raise(self._backoff_seconds(attempt))
                 continue
 
             if response.status_code in (401, 403):
@@ -448,12 +454,14 @@ class BufferClient:
                 raise BufferAuthError(message)
 
             if response.status_code == 429:
-                # Rate-limited before execution — not processed, safe to retry
-                # even for mutations.
+                # Rate-limited before execution — not processed, safe to
+                # retry (or, if the wait would exceed our cap, to raise
+                # instead) even for mutations: nothing has been dispatched
+                # to Buffer yet either way.
                 attempt += 1
                 if attempt > self._max_retries:
                     raise BufferRateLimitError("Buffer APIのレート制限を超えました。")
-                self._sleep(self._retry_delay(response, attempt))
+                self._sleep_or_raise(self._retry_delay(response, attempt))
                 continue
 
             if response.status_code >= 500:
@@ -466,7 +474,7 @@ class BufferClient:
                     raise BufferTransportError(
                         f"Buffer APIがエラーを返しました（HTTP {response.status_code}）"
                     )
-                self._sleep(self._retry_delay(response, attempt))
+                self._sleep_or_raise(self._retry_delay(response, attempt))
                 continue
 
             if response.status_code >= 300:
@@ -491,3 +499,25 @@ class BufferClient:
             except ValueError:
                 pass
         return self._backoff_seconds(attempt)
+
+    def _sleep_or_raise(self, delay: float) -> None:
+        """Sleep for `delay` seconds before retrying, unless that would
+        exceed `max_retry_sleep_seconds` (unset for the CLI's client —
+        unbounded, today's behavior; set to a small cap for the
+        Lambda-built client — see factory.build_publisher_without_uploads)
+        — in that case raise immediately instead of blocking past the
+        Lambda's own deadline.
+
+        Only ever called from paths where no mutation has been dispatched
+        to Buffer yet (429 before execution, or a retryable
+        transport/5xx failure on a *query*, never a mutation — see the
+        is_mutation branches in _post), so raising here instead of
+        sleeping never creates a "did it actually happen" ambiguity.
+        """
+        if self._max_retry_sleep_seconds is not None and delay > self._max_retry_sleep_seconds:
+            cap = self._max_retry_sleep_seconds
+            raise BufferRateLimitError(
+                f"Buffer への再試行待機が上限（{cap:.0f}秒）を超えるため中断しました"
+                f"（{delay:.0f}秒の待機が必要）。リクエストはまだBufferに送信されていません。"
+            )
+        self._sleep(delay)

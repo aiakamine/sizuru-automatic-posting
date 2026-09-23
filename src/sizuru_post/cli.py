@@ -17,6 +17,7 @@ import typer
 from pydantic import ValidationError
 
 from sizuru_post.adapters.buffer import BufferAmbiguousError, BufferProtocolError
+from sizuru_post.channels_sync import NoBufferOrganizationError, sync_channels
 from sizuru_post.config import Settings
 from sizuru_post.domain.models import PublishRequest
 from sizuru_post.factory import build_buffer_client, build_publisher, build_repo, build_settings
@@ -65,7 +66,14 @@ def _print_json(data: object) -> None:
 
 def _load_request(request_path: Path) -> PublishRequest:
     data = json.loads(request_path.read_text())
-    return PublishRequest.model_validate(data)
+    request = PublishRequest.model_validate(data)
+    if request.video_path is None:
+        # video_path=None only makes sense for the scheduling API's
+        # already-uploaded flow (Publisher.publish_uploaded); the CLI
+        # always needs an actual local file to probe/upload.
+        typer.echo("video_path は必須です", err=True)
+        raise typer.Exit(code=1)
+    return request
 
 
 # --- commands ------------------------------------------------------------------------
@@ -78,29 +86,11 @@ def channels() -> None:
     buffer = build_buffer_client(settings)
     repo = build_repo(settings)
 
-    organization_id = settings.buffer_organization_id
-    if organization_id is None:
-        organizations = buffer.get_organizations()
-        if not organizations:
-            message = "Buffer組織が見つかりません。BUFFER_ORGANIZATION_ID を設定してください。"
-            typer.echo(message, err=True)
-            raise typer.Exit(code=1)
-        organization_id = organizations[0]["id"]
-
-    raw_channels = buffer.get_channels(organization_id)
-    repo.upsert_channels(
-        [
-            {
-                "buffer_channel_id": c["id"],
-                "service": c.get("service"),
-                "name": c.get("name"),
-                "display_name": c.get("displayName") or c.get("name"),
-                "is_disconnected": bool(c.get("isDisconnected", False)),
-                "is_queue_paused": bool(c.get("isQueuePaused", False)),
-            }
-            for c in raw_channels
-        ]
-    )
+    try:
+        raw_channels = sync_channels(buffer, repo, settings.buffer_organization_id)
+    except NoBufferOrganizationError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
 
     for c in raw_channels:
         typer.echo(f"{c.get('service')}\t{c.get('displayName') or c.get('name')}\t{c.get('id')}")

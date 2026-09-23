@@ -66,3 +66,10 @@ class Settings(BaseSettings):
     # infra/sam/README.md). Optional since the CLI never sets these.
     supabase_jwt_issuer: str | None = Field(default=None, validation_alias="SUPABASE_JWT_ISSUER")
     supabase_jwt_audience: str | None = Field(default=None, validation_alias="SUPABASE_JWT_AUDIENCE")
+
+    # Shared secret for the scheduling skill's /schedule/* routes (see
+    # api/schedule.py) — a completely separate auth scheme from the admin
+    # dashboard's Supabase JWT above. Optional: unset in any environment
+    # that doesn't need the scheduling API (those routes 503 instead of
+    # crashing Settings construction — see api/schedule._require_api_key).
+    scheduler_api_key: SecretStr | None = Field(default=None, validation_alias="SCHEDULER_API_KEY")

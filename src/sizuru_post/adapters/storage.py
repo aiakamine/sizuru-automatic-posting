@@ -21,11 +21,27 @@ from typing import Any, Protocol
 class S3ClientProtocol(Protocol):
     def put_object(self, **kwargs: Any) -> object: ...
 
+    def generate_presigned_post(self, **kwargs: Any) -> dict[str, Any]: ...
+
+    def list_objects_v2(self, **kwargs: Any) -> dict[str, Any]: ...
+
 
 @dataclass(frozen=True)
 class StoredObject:
     key: str
     public_url: str
+
+
+@dataclass(frozen=True)
+class PresignedUpload:
+    """A presigned S3 POST for direct-from-client uploads (the scheduling
+    API's `/schedule/uploads`), plus the key/URL the client should report
+    back once the upload succeeds."""
+
+    key: str
+    public_url: str
+    upload_url: str
+    fields: dict[str, str]
 
 
 class S3Storage:
@@ -52,9 +68,8 @@ class S3Storage:
         return self._upload(path, subdir="thumbnails", default_extension=".jpg", content_type="image/jpeg")
 
     def _upload(self, path: Path, *, subdir: str, default_extension: str, content_type: str) -> StoredObject:
-        now = self._clock()
         extension = path.suffix.lower() or default_extension
-        key = f"{self._prefix}{subdir}/{now:%Y}/{now:%m}/{self._uuid_factory().hex}{extension}"
+        key = self._new_key(subdir, extension)
 
         with path.open("rb") as file_obj:
             self._client.put_object(
@@ -64,5 +79,54 @@ class S3Storage:
                 ContentType=content_type,
             )
 
-        public_url = f"https://{self._bucket}.s3.{self._region}.amazonaws.com/{key}"
-        return StoredObject(key=key, public_url=public_url)
+        return StoredObject(key=key, public_url=self.public_url_for(key))
+
+    def presign_post(
+        self, *, subdir: str, extension: str, content_type: str, max_bytes: int, expires_in: int
+    ) -> PresignedUpload:
+        """A presigned S3 POST the client can upload directly to (see
+        `/schedule/uploads`), scoped to a freshly-generated key, exact
+        Content-Type, and a `content-length-range` upper bound — same key
+        layout/prefix conventions as `_upload`, just without the server
+        ever touching the file bytes."""
+        key = self._new_key(subdir, extension)
+        presigned = self._client.generate_presigned_post(
+            Bucket=self._bucket,
+            Key=key,
+            Fields={"Content-Type": content_type},
+            Conditions=[
+                {"Content-Type": content_type},
+                ["content-length-range", 1, max_bytes],
+            ],
+            ExpiresIn=expires_in,
+        )
+        return PresignedUpload(
+            key=key,
+            public_url=self.public_url_for(key),
+            upload_url=presigned["url"],
+            fields=presigned["fields"],
+        )
+
+    def exists(self, key: str) -> bool:
+        """True if `key` exists in the bucket.
+
+        Deliberately implemented via ListObjectsV2(Prefix=key), not
+        HeadObject: HeadObject's own IAM check for a *missing* key needs
+        plain s3:ListBucket without the request-scoped s3:prefix condition
+        key our IAM grant is conditioned on (see infra/sam/template.yaml),
+        so it would come back as a generic, ambiguous 403 rather than a
+        clean "doesn't exist" regardless of that grant. ListObjectsV2 with
+        Prefix=key DOES carry s3:prefix in the request (matching the
+        grant) and needs no s3:GetObject permission at all — a prefix
+        match isn't an exact match, though, so the returned key is
+        compared exactly rather than just checking Contents is non-empty.
+        """
+        listing = self._client.list_objects_v2(Bucket=self._bucket, Prefix=key, MaxKeys=1)
+        return any(obj["Key"] == key for obj in listing.get("Contents", []))
+
+    def public_url_for(self, key: str) -> str:
+        return f"https://{self._bucket}.s3.{self._region}.amazonaws.com/{key}"
+
+    def _new_key(self, subdir: str, extension: str) -> str:
+        now = self._clock()
+        return f"{self._prefix}{subdir}/{now:%Y}/{now:%m}/{self._uuid_factory().hex}{extension}"

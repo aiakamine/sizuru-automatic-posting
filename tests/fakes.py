@@ -9,7 +9,14 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from sizuru_post.adapters.buffer import CreatePostResult
-from sizuru_post.adapters.repo import VALID_CHANNEL_SERVICES, ChannelRow, PostRow, SubmissionRow
+from sizuru_post.adapters.repo import (
+    VALID_CHANNEL_SERVICES,
+    ChannelRow,
+    PostInRange,
+    PostRow,
+    SubmissionRow,
+    UniqueViolationError,
+)
 from sizuru_post.adapters.storage import StoredObject
 from sizuru_post.domain.models import PostStatus, PublishRequest, Target
 
@@ -26,11 +33,25 @@ class InMemoryRepo:
         self._admin_user_ids: set[str] = admin_user_ids or set()
 
     def upsert_channels(self, channels: list[dict[str, Any]]) -> None:
-        for row in channels:
-            if row.get("service") not in VALID_CHANNEL_SERVICES:
-                continue
-            channel = ChannelRow.model_validate(row)
+        valid = [c for c in channels if c.get("service") in VALID_CHANNEL_SERVICES]
+        if not valid:
+            return
+        seen_buffer_channel_ids: set[str] = set()
+        for row in valid:
+            buffer_channel_id = row["buffer_channel_id"]
+            seen_buffer_channel_ids.add(buffer_channel_id)
+            existing = next(
+                (c for c in self._channels.values() if c.buffer_channel_id == buffer_channel_id), None
+            )
+            payload = dict(row)
+            payload.setdefault("id", existing.id if existing is not None else uuid4())
+            channel = ChannelRow.model_validate(payload)
             self._channels[channel.id] = channel
+        # Mirrors SupabaseRepo.upsert_channels: anything missing from this
+        # batch is no longer in Buffer's list, so mark it disconnected.
+        for channel_id, channel in list(self._channels.items()):
+            if channel.buffer_channel_id not in seen_buffer_channel_ids:
+                self._channels[channel_id] = channel.model_copy(update={"is_disconnected": True})
 
     def list_channels(self) -> list[ChannelRow]:
         return list(self._channels.values())
@@ -45,6 +66,12 @@ class InMemoryRepo:
         duration_sec: float | None,
         approved_at: datetime,
     ) -> UUID:
+        # Mirrors the real DB's `submissions.s3_key` UNIQUE constraint
+        # (and SupabaseRepo's matching 23505 handling): callers must check
+        # get_submission_by_s3_key() first (see Publisher.publish_uploaded)
+        # rather than relying on this to silently dedupe.
+        if any(s.s3_key == s3_key for s in self._submissions.values()):
+            raise UniqueViolationError(f"s3_key は一意である必要があります（重複）: {s3_key}")
         submission_id = uuid4()
         self._submissions[submission_id] = SubmissionRow(
             id=submission_id,
@@ -60,7 +87,30 @@ class InMemoryRepo:
     def get_submission(self, submission_id: UUID) -> SubmissionRow | None:
         return self._submissions.get(submission_id)
 
-    def upsert_post_pending(
+    def get_submission_by_s3_key(self, s3_key: str) -> SubmissionRow | None:
+        return next((s for s in self._submissions.values() if s.s3_key == s3_key), None)
+
+    def list_posts_in_range(self, start: datetime, end: datetime) -> list[PostInRange]:
+        excluded = {PostStatus.CANCELED, PostStatus.FAILED}
+        rows = [
+            p
+            for p in self._posts.values()
+            if p.due_at is not None and start <= p.due_at < end and p.status not in excluded
+        ]
+        rows.sort(key=lambda p: (p.due_at, p.id))  # type: ignore[union-attr, arg-type]
+        return [
+            PostInRange(
+                post_id=p.id,
+                submission_id=p.submission_id,
+                service=self._channels[p.channel_id].service,
+                due_at=p.due_at,  # type: ignore[arg-type]
+                status=p.status.value,
+                title=self._submissions[p.submission_id].title,
+            )
+            for p in rows
+        ]
+
+    def claim_pending_post(
         self,
         *,
         submission_id: UUID,
@@ -70,7 +120,7 @@ class InMemoryRepo:
         due_at: datetime | None,
         is_draft: bool,
         platform_options: dict[str, Any],
-    ) -> PostRow:
+    ) -> tuple[PostRow, bool]:
         existing = next(
             (
                 p
@@ -80,7 +130,7 @@ class InMemoryRepo:
             None,
         )
         if existing is not None:
-            return existing
+            return existing, False
         post_id = uuid4()
         row = PostRow(
             id=post_id,
@@ -94,7 +144,7 @@ class InMemoryRepo:
             status=PostStatus.PENDING,
         )
         self._posts[post_id] = row
-        return row
+        return row, True
 
     def update_post(self, post_id: UUID, **fields: Any) -> None:
         row = self._posts[post_id]
@@ -141,6 +191,11 @@ class FakeBuffer:
     delete_exceptions: dict[str, Exception] = field(default_factory=dict)
     edit_calls: list[tuple[str, str | None, Any]] = field(default_factory=list)
     delete_calls: list[str] = field(default_factory=list)
+    organizations: list[dict[str, Any]] = field(default_factory=list)
+    channels_by_organization: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    get_organizations_exception: Exception | None = None
+    get_channels_exception: Exception | None = None
+    get_channels_calls: list[str] = field(default_factory=list)
 
     def create_post(
         self, request: PublishRequest, target: Target, channel_id: str, video_url: str
@@ -173,6 +228,17 @@ class FakeBuffer:
         if post_id in self.delete_exceptions:
             raise self.delete_exceptions[post_id]
         return self.delete_results.get(post_id, CreatePostResult(ok=True, post_id=post_id, status="canceled"))
+
+    def get_organizations(self) -> list[dict[str, Any]]:
+        if self.get_organizations_exception is not None:
+            raise self.get_organizations_exception
+        return self.organizations
+
+    def get_channels(self, organization_id: str) -> list[dict[str, Any]]:
+        self.get_channels_calls.append(organization_id)
+        if self.get_channels_exception is not None:
+            raise self.get_channels_exception
+        return self.channels_by_organization.get(organization_id, [])
 
 
 @dataclass

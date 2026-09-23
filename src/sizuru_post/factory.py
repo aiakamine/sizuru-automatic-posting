@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import cast
 
 import boto3
+from botocore.exceptions import ClientError
 
 from sizuru_post.adapters.buffer import BufferClient
 from sizuru_post.adapters.repo import SupabaseRepo
@@ -29,13 +30,34 @@ _SSM_PREFIX_ENV = "SSM_PREFIX"
 _ssm_cache: dict[str, str] = {}
 
 
-def _resolve_ssm_secret(prefix: str, name: str) -> str:
+def _resolve_ssm_parameter(prefix: str, name: str, *, required: bool) -> str | None:
     key = f"{prefix}{name}"
-    if key not in _ssm_cache:
-        client = boto3.client("ssm")
+    if key in _ssm_cache:
+        return _ssm_cache[key]
+    client = boto3.client("ssm")
+    try:
         response = client.get_parameter(Name=key, WithDecryption=True)
-        _ssm_cache[key] = response["Parameter"]["Value"]
+    except ClientError as exc:
+        # Only an *optional* parameter (SCHEDULER_API_KEY: the scheduling
+        # API may simply not be deployed in this environment) tolerates
+        # "doesn't exist" — required parameters propagate the error as-is,
+        # same as before. Not cached, so a parameter created later is
+        # picked up without waiting for a cold start.
+        if not required and exc.response.get("Error", {}).get("Code") == "ParameterNotFound":
+            return None
+        raise
+    _ssm_cache[key] = str(response["Parameter"]["Value"])
     return _ssm_cache[key]
+
+
+def _resolve_ssm_secret(prefix: str, name: str) -> str:
+    value = _resolve_ssm_parameter(prefix, name, required=True)
+    assert value is not None  # noqa: S101 - required=True guarantees this (or ClientError was raised)
+    return value
+
+
+def _resolve_optional_ssm_secret(prefix: str, name: str) -> str | None:
+    return _resolve_ssm_parameter(prefix, name, required=False)
 
 
 def reset_ssm_cache() -> None:
@@ -50,7 +72,7 @@ def reset_ssm_cache() -> None:
     _ssm_cache.clear()
 
 
-def build_settings() -> Settings:
+def build_settings(*, include_scheduler_key: bool = True) -> Settings:
     """Construct Settings for any entry point (CLI or Lambda).
 
     BUFFER_API_KEY / SUPABASE_SERVICE_ROLE_KEY are resolved from SSM
@@ -60,6 +82,19 @@ def build_settings() -> Settings:
     Lambda environment variables. SUPABASE_URL and everything else stays a
     plain env var either way. Falls back to plain Settings() (env/.env)
     when SSM_PREFIX is unset, e.g. local CLI usage.
+
+    SCHEDULER_API_KEY is resolved the same way but optionally (a missing
+    parameter becomes `None` instead of raising, since not every deployment
+    needs the scheduling API — see config.Settings.scheduler_api_key /
+    api/schedule._require_api_key) — AND only when `include_scheduler_key`
+    is True. Callers whose IAM role was never granted read access to that
+    parameter at all (api/sync_handler.py's SyncFunction — only
+    ApiFunction serves /schedule/* routes) must pass False: the missing
+    grant would surface as an *unhandled* AccessDenied ClientError here
+    (only "the parameter doesn't exist" is tolerated, not "denied"), which
+    is exactly what took SyncFunction down in production. Skipping the
+    call entirely is simpler and safer than trying to special-case that
+    error code.
     """
     prefix = os.environ.get(_SSM_PREFIX_ENV)
     if not prefix:
@@ -67,12 +102,24 @@ def build_settings() -> Settings:
     return Settings(
         buffer_api_key=_resolve_ssm_secret(prefix, "BUFFER_API_KEY"),
         supabase_service_role_key=_resolve_ssm_secret(prefix, "SUPABASE_SERVICE_ROLE_KEY"),
+        scheduler_api_key=(
+            _resolve_optional_ssm_secret(prefix, "SCHEDULER_API_KEY") if include_scheduler_key else None
+        ),
     )
 
 
-def build_buffer_client(settings: Settings, *, timeout: float = 30.0, max_retries: int = 4) -> BufferClient:
+def build_buffer_client(
+    settings: Settings,
+    *,
+    timeout: float = 30.0,
+    max_retries: int = 4,
+    max_retry_sleep_seconds: float | None = None,
+) -> BufferClient:
     return BufferClient(
-        api_key=settings.buffer_api_key.get_secret_value(), timeout=timeout, max_retries=max_retries
+        api_key=settings.buffer_api_key.get_secret_value(),
+        timeout=timeout,
+        max_retries=max_retries,
+        max_retry_sleep_seconds=max_retry_sleep_seconds,
     )
 
 
@@ -130,12 +177,14 @@ def build_publisher_without_uploads(settings: Settings) -> Publisher:
     """Publisher wired for edit/cancel/sync only (no uploads) — used by the
     API/sync Lambdas, which never need S3 configured.
 
-    Uses a short Buffer timeout and a single retry (vs the CLI's generous
-    defaults): a Lambda invocation has a hard wall-clock deadline, so a slow
-    or erroring Buffer response must not be allowed to consume it.
+    Uses a short Buffer timeout, a single retry, and a capped retry sleep
+    (vs the CLI's generous/unbounded defaults): a Lambda invocation has a
+    hard wall-clock deadline, so a slow, erroring, or rate-limited Buffer
+    response must not be allowed to consume it (see
+    adapters.buffer.BufferClient._sleep_or_raise).
     """
     return Publisher(
-        buffer=build_buffer_client(settings, timeout=8.0, max_retries=1),
+        buffer=build_buffer_client(settings, timeout=8.0, max_retries=1, max_retry_sleep_seconds=5.0),
         storage=_UnavailableStorage(),
         repo=build_repo(settings),
     )

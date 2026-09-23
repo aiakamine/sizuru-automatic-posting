@@ -427,3 +427,60 @@ class TestSyncCommand:
         # Assert
         assert result.exit_code == 0
         assert calls == [{"full": True}]
+
+
+class TestChannelsCommand:
+    def test_upserts_channels_and_prints_a_table(
+        self, monkeypatch: pytest.MonkeyPatch, repo: InMemoryRepo, buffer: FakeBuffer
+    ) -> None:
+        # Arrange
+        buffer.organizations = [{"id": "org-1"}]
+        buffer.channels_by_organization = {
+            "org-1": [{"id": "c1", "service": "tiktok", "name": "n1", "displayName": "TikTok Ch"}]
+        }
+        monkeypatch.setattr(cli_module, "build_buffer_client", lambda settings: buffer)
+        monkeypatch.setattr(cli_module, "build_repo", lambda settings: repo)
+
+        # Act
+        result = runner.invoke(cli_module.app, ["channels"])
+
+        # Assert
+        assert result.exit_code == 0
+        assert "TikTok Ch" in result.output
+        assert any(c.buffer_channel_id == "c1" for c in repo.list_channels())
+
+    def test_exits_one_with_clear_message_when_no_organization_found(
+        self, monkeypatch: pytest.MonkeyPatch, repo: InMemoryRepo, buffer: FakeBuffer
+    ) -> None:
+        # Arrange
+        buffer.organizations = []
+        monkeypatch.setattr(cli_module, "build_buffer_client", lambda settings: buffer)
+        monkeypatch.setattr(cli_module, "build_repo", lambda settings: repo)
+
+        # Act
+        result = runner.invoke(cli_module.app, ["channels"])
+
+        # Assert
+        assert result.exit_code == 1
+        assert "BUFFER_ORGANIZATION_ID" in result.output
+
+    def test_marks_channels_missing_from_buffer_as_disconnected(
+        self, monkeypatch: pytest.MonkeyPatch, buffer: FakeBuffer
+    ) -> None:
+        # Arrange: repo already has an old channel Buffer no longer reports
+        # (root cause of a live incident: `channels` upserted the new
+        # channel but never flagged the old one as gone).
+        stale = _channel("x")
+        repo = InMemoryRepo(channels=[stale])
+        buffer.organizations = [{"id": "org-1"}]
+        buffer.channels_by_organization = {"org-1": [{"id": "buf-new-x", "service": "x", "name": "new"}]}
+        monkeypatch.setattr(cli_module, "build_buffer_client", lambda settings: buffer)
+        monkeypatch.setattr(cli_module, "build_repo", lambda settings: repo)
+
+        # Act
+        result = runner.invoke(cli_module.app, ["channels"])
+
+        # Assert
+        assert result.exit_code == 0
+        updated_stale = next(c for c in repo.list_channels() if c.id == stale.id)
+        assert updated_stale.is_disconnected is True

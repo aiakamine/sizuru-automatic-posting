@@ -154,6 +154,34 @@ def test_supabase_jwt_issuer_and_audience_are_optional(monkeypatch: pytest.Monke
     assert settings.supabase_jwt_audience is None
 
 
+def test_scheduler_api_key_is_optional(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Arrange: most environments (the CLI, the admin dashboard Lambdas)
+    # never set this — only the scheduling API route needs it.
+    for key, value in REQUIRED_ENV.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.delenv("SCHEDULER_API_KEY", raising=False)
+
+    # Act
+    settings = Settings(_env_file=None)
+
+    # Assert
+    assert settings.scheduler_api_key is None
+
+
+def test_scheduler_api_key_loads_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Arrange
+    for key, value in REQUIRED_ENV.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setenv("SCHEDULER_API_KEY", "shared-secret")
+
+    # Act
+    settings = Settings(_env_file=None)
+
+    # Assert
+    assert settings.scheduler_api_key is not None
+    assert settings.scheduler_api_key.get_secret_value() == "shared-secret"
+
+
 def test_supabase_jwt_issuer_and_audience_load_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     # Arrange: how the API Lambda actually gets them (see
     # infra/sam/template.yaml's ApiFunction Environment.Variables).

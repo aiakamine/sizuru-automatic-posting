@@ -5,6 +5,8 @@ Routes (must match infra/sam/template.yaml exactly):
   PATCH  /posts/{post_id}          -> Publisher.edit
   POST   /posts/{post_id}/cancel   -> Publisher.cancel
   POST   /sync                     -> Publisher.sync
+  /schedule/*                      -> sizuru_post.api.schedule (separate
+                                       auth scheme — see dispatch() below)
 
 Auth: the HTTP API has NO authorizer attached (see infra/sam/README.md —
 API Gateway's native JWT authorizer only supports RSA, but Supabase signs
@@ -12,22 +14,21 @@ with ES256). This handler verifies the `Authorization: Bearer <token>`
 header itself with PyJWT (sizuru_post.api.auth) before doing anything else,
 then checks the verified `sub` claim against admin_users via the repo
 (defense in depth — the browser also reads `submissions`/`posts` directly
-via RLS regardless of this API).
+via RLS regardless of this API). `/schedule/*` routes are dispatched to
+sizuru_post.api.schedule BEFORE this JWT check — they use a completely
+separate x-api-key scheme instead (see that module's docstring); a JWT
+never authenticates them, and their API key never authenticates these
+admin routes.
 
 CORS is handled entirely by API Gateway's CORS configuration, not here.
 """
 
 from __future__ import annotations
 
-import base64
-import binascii
-import json
 import logging
 from datetime import datetime
 from typing import Any
 from uuid import UUID
-
-import jwt
 
 from sizuru_post.adapters.buffer import (
     BufferAmbiguousError,
@@ -35,10 +36,16 @@ from sizuru_post.adapters.buffer import (
     BufferError,
     BufferProtocolError,
 )
+from sizuru_post.api import _container as container
+from sizuru_post.api import schedule as schedule_api
 from sizuru_post.api._deadline import make_should_stop
-from sizuru_post.api.auth import AuthError, build_jwk_client, verify_bearer_token
+from sizuru_post.api._http import ApiError, get_header
+from sizuru_post.api._http import error_response as _error_response
+from sizuru_post.api._http import parse_body as _parse_body
+from sizuru_post.api._http import response as _response
+from sizuru_post.api.auth import AuthError, verify_bearer_token
 from sizuru_post.config import Settings
-from sizuru_post.factory import build_publisher_without_uploads, build_settings, reset_ssm_cache
+from sizuru_post.domain.models import validate_due_at_is_future
 from sizuru_post.publisher import (
     BufferRejectedError,
     PostNotEditableError,
@@ -50,100 +57,19 @@ from sizuru_post.serialization import target_result_to_dict
 
 logger = logging.getLogger(__name__)
 
-_settings: Settings | None = None
-_publisher: Publisher | None = None
-_jwk_client: jwt.PyJWKClient | None = None
-
-
-def get_settings() -> Settings:
-    """Build Settings lazily, once per container."""
-    global _settings
-    if _settings is None:
-        _settings = build_settings()
-    return _settings
-
-
-def get_publisher() -> Publisher:
-    """Build the Publisher lazily, once per container (Lambda execution
-    environment reuse avoids rebuilding it on every warm invocation)."""
-    global _publisher
-    if _publisher is None:
-        _publisher = build_publisher_without_uploads(get_settings())
-    return _publisher
-
-
-def get_jwk_client() -> jwt.PyJWKClient:
-    """Build the JWKS resolver lazily, once per container — it caches keys
-    in-process for its own lifespan (see api/auth.build_jwk_client), so
-    reusing one instance across invocations avoids refetching the JWKS on
-    every request."""
-    global _jwk_client
-    if _jwk_client is None:
-        settings = get_settings()
-        if not settings.supabase_jwt_issuer:
-            raise RuntimeError("SUPABASE_JWT_ISSUER が設定されていません")
-        _jwk_client = build_jwk_client(settings.supabase_jwt_issuer)
-    return _jwk_client
-
-
-def reset_publisher() -> None:
-    """Drop every per-container cache (Settings, Publisher, JWKS client)
-    and the SSM secret cache, so the *next* invocation rebuilds everything
-    from a fresh read (the API key may have been rotated). Does NOT retry
-    the request that triggered this — see the BufferAuthError handling in
-    `handler()`."""
-    global _settings, _publisher, _jwk_client
-    _settings = None
-    _publisher = None
-    _jwk_client = None
-    reset_ssm_cache()
-
-
-class ApiError(Exception):
-    """Carries the HTTP status/error code/message for a deliberate,
-    expected failure (auth, validation, bad request)."""
-
-    def __init__(self, status_code: int, code: str, message: str) -> None:
-        super().__init__(message)
-        self.status_code = status_code
-        self.code = code
-        self.message = message
-
-
-def _response(status_code: int, body: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "statusCode": status_code,
-        "headers": {"Content-Type": "application/json"},
-        "body": json.dumps(body, ensure_ascii=False),
-    }
-
-
-def _error_response(status_code: int, code: str, message: str) -> dict[str, Any]:
-    return _response(status_code, {"error": {"code": code, "message": message}})
-
-
-def _get_authorization_header(event: dict[str, Any]) -> str | None:
-    # HTTP API payload v2 always lowercases header names, but be defensive
-    # (proxying, hand-built test events, ...) rather than assume it.
-    headers = event.get("headers") or {}
-    for key, value in headers.items():
-        if key.lower() == "authorization":
-            return str(value)
-    return None
-
 
 def _authenticate(event: dict[str, Any], settings: Settings) -> dict[str, Any]:
     """Verify the request's Supabase-issued JWT ourselves (see this
     module's docstring for why) and return its claims."""
     if not settings.supabase_jwt_issuer or not settings.supabase_jwt_audience:
         raise RuntimeError("SUPABASE_JWT_ISSUER/SUPABASE_JWT_AUDIENCE が設定されていません")
-    header = _get_authorization_header(event)
+    header = get_header(event, "authorization")
     try:
         return verify_bearer_token(
             header,
             issuer=settings.supabase_jwt_issuer,
             audience=settings.supabase_jwt_audience,
-            jwk_client=get_jwk_client(),
+            jwk_client=container.get_jwk_client(),
         )
     except AuthError as exc:
         raise ApiError(401, "unauthorized", "認証情報が無効です") from exc
@@ -165,27 +91,6 @@ def _parse_post_id(raw: str) -> UUID:
         raise ApiError(404, "not_found", "投稿が見つかりません") from exc
 
 
-def _parse_body(event: dict[str, Any]) -> dict[str, Any]:
-    raw = event.get("body")
-    if raw is None:
-        return {}
-    if event.get("isBase64Encoded"):
-        # API Gateway HTTP API (payload v2) base64-encodes the body in some
-        # cases (e.g. certain proxy/CDN paths or non-UTF8-safe content
-        # negotiation) and sets isBase64Encoded=True to say so.
-        try:
-            raw = base64.b64decode(raw, validate=True).decode("utf-8")
-        except (binascii.Error, UnicodeDecodeError) as exc:
-            raise ApiError(400, "bad_request", "リクエストボディがbase64として不正です") from exc
-    try:
-        data = json.loads(raw)
-    except (json.JSONDecodeError, TypeError) as exc:
-        raise ApiError(400, "bad_request", "リクエストボディがJSONとして不正です") from exc
-    if not isinstance(data, dict):
-        raise ApiError(400, "bad_request", "リクエストボディはオブジェクトである必要があります")
-    return data
-
-
 def _parse_caption(body: dict[str, Any]) -> str | None:
     caption = body.get("caption")
     if caption is not None and not isinstance(caption, str):
@@ -203,8 +108,9 @@ def _parse_due_at(body: dict[str, Any]) -> datetime | None:
         parsed = datetime.fromisoformat(raw)
     except ValueError as exc:
         raise ApiError(400, "validation", "due_at の形式が不正です（ISO8601で指定してください）") from exc
-    if parsed.tzinfo is None:
-        raise ApiError(400, "validation", "due_at にはタイムゾーンを含めてください")
+    error = validate_due_at_is_future(parsed)
+    if error is not None:
+        raise ApiError(400, "validation", error)
     return parsed
 
 
@@ -253,10 +159,20 @@ def _dispatch(event: dict[str, Any], publisher: Publisher, context: object) -> d
     raise ApiError(404, "not_found", "不明なエンドポイントです")
 
 
+def _is_schedule_route(route_key: str) -> bool:
+    _, _, path = route_key.partition(" ")
+    return path.startswith("/schedule/")
+
+
 def handler(event: dict[str, Any], context: object = None) -> dict[str, Any]:
     try:
-        settings = get_settings()
-        publisher = get_publisher()
+        if _is_schedule_route(event.get("routeKey", "")):
+            # A completely separate auth scheme (x-api-key) — see this
+            # module's docstring and api/schedule.py's. Never reaches
+            # _authenticate()/_require_admin() below.
+            return schedule_api.dispatch(event, context)
+        settings = container.get_settings()
+        publisher = container.get_publisher()
         claims = _authenticate(event, settings)
         _require_admin(claims, publisher)
         return _dispatch(event, publisher, context)
@@ -277,7 +193,7 @@ def handler(event: dict[str, Any], context: object = None) -> dict[str, Any]:
         # in SSM. Reset the cache so the *next* invocation re-reads it
         # fresh; this request itself is not retried.
         logger.error("Buffer認証エラーが発生しました: %s", exc)
-        reset_publisher()
+        container.reset()
         return _error_response(502, "upstream", "Bufferとの認証でエラーが発生しました")
     except BufferError:
         # Buffer reachable but erroring (5xx, malformed response, rate

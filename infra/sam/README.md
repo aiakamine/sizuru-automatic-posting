@@ -53,12 +53,29 @@ parameters as before) are now passed to `ApiFunction` as plain
 `SUPABASE_JWT_ISSUER`/`SUPABASE_JWT_AUDIENCE` environment variables
 instead of being consumed by an authorizer config.
 
+## Auth: the scheduling API (`/schedule/*`)
+
+The `sns-schedule` skill (a local CLI, not a browser) calls
+`POST /schedule/uploads`, `GET /schedule/posts` and
+`POST /schedule/submissions` — see `sizuru_post.api.schedule`. These
+routes use a **completely separate** auth scheme from everything above: a
+single shared secret sent as an `x-api-key` header, compared with
+`hmac.compare_digest` against the `SCHEDULER_API_KEY` SSM parameter (see
+`config.Settings.scheduler_api_key`). A Supabase JWT never authenticates
+these routes, and this API key never authenticates the admin routes.
+Unlike `BUFFER_API_KEY`/`SUPABASE_SERVICE_ROLE_KEY`, this parameter is
+**optional** — if it doesn't exist in SSM, `/schedule/*` routes respond
+`503 scheduler_disabled` instead of the deploy failing; a wrong/missing
+key on a request gets `401 unauthorized`.
+
 ## 1. Put secrets in SSM Parameter Store
 
 Both Lambdas resolve `BUFFER_API_KEY` and `SUPABASE_SERVICE_ROLE_KEY` from
 SSM SecureString parameters at runtime (`factory.build_settings()`),
 **not** from plain Lambda environment variables — so `describe-stack` /
-CloudFormation drift never exposes them in plaintext.
+CloudFormation drift never exposes them in plaintext. `ApiFunction`
+additionally resolves `SCHEDULER_API_KEY` the same way (optional — see
+above).
 
 ```bash
 aws ssm put-parameter \
@@ -70,6 +87,15 @@ aws ssm put-parameter \
   --name /sizuru/SUPABASE_SERVICE_ROLE_KEY \
   --type SecureString \
   --value "<your Supabase service_role key, from Supabase project settings>"
+
+# Optional — only needed to enable the sns-schedule skill's API. Generate
+# a random key; the same value goes into this repo's own .env as
+# SIZURU_API_KEY (see "Local usage: the sns-schedule skill" below).
+python -c "import secrets; print(secrets.token_urlsafe(32))"
+aws ssm put-parameter \
+  --name /sizuru/SCHEDULER_API_KEY \
+  --type SecureString \
+  --value "<the generated key>"
 ```
 
 Use a different `--name` prefix if you pass a non-default
@@ -98,8 +124,13 @@ uvx --from aws-sam-cli sam deploy \
   --parameter-overrides \
     SupabaseUrl=https://hdqrvhnhlyykocphetfg.supabase.co \
     AllowedFrontendOrigin=https://<cloudfront-domain-once-known> \
-    SsmParameterPrefix=/sizuru/
+    SsmParameterPrefix=/sizuru/ \
+    ClipsBucketName=sizuru-clips-034165313077
 ```
+
+`ClipsBucketName` defaults to the bucket the CLI already uses locally, so
+it only needs to be passed explicitly if you're deploying against a
+different bucket.
 
 `AllowedFrontendOrigin` is the CloudFront domain from this same stack's
 `CloudFrontDomain` output — on the very first deploy you won't know it yet,
@@ -118,6 +149,45 @@ aws cloudformation describe-stacks --stack-name sizuru-admin \
 - `ApiUrl` → frontend's `NEXT_PUBLIC_API_URL`
 - `CloudFrontDomain` → the site's URL, and the value for `AllowedFrontendOrigin` above
 - `FrontendBucket` → where to upload the frontend build (step 5)
+
+### Post-deploy smoke check (mandatory)
+
+Run this after **every** deploy that touches `ApiFunction` or
+`SyncFunction` (including an IAM-only change). `sam deploy` succeeding
+only means CloudFormation accepted the template — an IAM/env-var mistake
+(e.g. a Lambda missing an `ssm:GetParameter` grant it needs, or resolving
+a secret it *shouldn't*) only shows up at runtime, and `SyncFunction`
+especially has no human watching it invocation-by-invocation. This exact
+class of bug once broke every `SyncFunction` invocation for hours before
+anyone noticed.
+
+```bash
+# 1. SyncFunction actually runs end-to-end:
+SYNC_FN=$(aws cloudformation describe-stack-resources --stack-name sizuru-admin \
+  --logical-resource-id SyncFunction --query 'StackResources[0].PhysicalResourceId' --output text)
+aws lambda invoke --function-name "$SYNC_FN" --payload '{}' \
+  --cli-binary-format raw-in-base64-out /tmp/sync-smoke.json
+cat /tmp/sync-smoke.json
+```
+
+Expect a plain JSON counts object, e.g.
+`{"sent":0,"failed":0,"canceled":0,"unchanged":0,"stuck_pending":0}`. An
+`"errorMessage"`/`"errorType"` key means the invocation itself failed —
+check CloudWatch Logs for `$SYNC_FN` and do not consider the deploy done
+until this is clean.
+
+```bash
+# 2. /schedule/posts responds correctly with the configured API key
+#    (same idea, for ApiFunction — SIZURU_API_URL/SIZURU_API_KEY as in
+#    "Local usage: the sns-schedule skill" below):
+curl -sS -H "x-api-key: $SIZURU_API_KEY" \
+  "$SIZURU_API_URL/schedule/posts?from=$(date -u +%Y-%m-%dT%H:%M:%SZ)&to=$(date -u -v+1d +%Y-%m-%dT%H:%M:%SZ)"
+# GNU/Linux date instead of the macOS -v+1d above: date -u -d '+1 day' +%Y-%m-%dT%H:%M:%SZ
+```
+
+Expect `{"posts": [...]}` — a `401`/`503`/`500` means something's wrong
+(wrong/missing key, `SCHEDULER_API_KEY` not in SSM, or an IAM problem);
+diagnose before considering the deploy done.
 
 ## 4. Supabase Auth: allow the CloudFront domain
 
@@ -206,6 +276,25 @@ any are for the wrong platform (darwin/x86_64) — a sanity check for the
 `manylinux2014_aarch64`/cp312 wheel now fails the build outright rather
 than silently falling back to host-platform wheels that can't load in the
 arm64 Python 3.12 Lambda runtime.
+
+## Local usage: the sns-schedule skill
+
+The `sns-schedule` skill (`.claude/skills/sns-schedule`) is a local CLI
+client of the deployed `/schedule/*` routes — it never talks to Buffer or
+Supabase directly, only to this API. It reads its own config from this
+repo's `.env` (via the same `extra="ignore"` `Settings` the rest of the
+CLI uses, so these keys coexist with `BUFFER_API_KEY` etc. without
+conflict):
+
+```bash
+# .env
+SIZURU_API_URL=https://<HttpApi id>.execute-api.<region>.amazonaws.com
+SIZURU_API_KEY=<the SCHEDULER_API_KEY value you put in SSM above>
+```
+
+`SIZURU_API_URL` is the same `ApiUrl` stack output used for the admin
+frontend's `NEXT_PUBLIC_API_URL` (step 3). Never print/log
+`SIZURU_API_KEY`'s value.
 
 ## 既知の制約 (Known limitations)
 
