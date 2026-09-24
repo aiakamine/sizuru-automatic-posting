@@ -11,6 +11,8 @@ from uuid import UUID, uuid4
 from sizuru_post.adapters.buffer import CreatePostResult
 from sizuru_post.adapters.repo import (
     VALID_CHANNEL_SERVICES,
+    AdminUserRow,
+    AuthUserAlreadyExistsError,
     ChannelRow,
     PostInRange,
     PostRow,
@@ -31,6 +33,15 @@ class InMemoryRepo:
         self._submissions: dict[UUID, SubmissionRow] = {}
         self._posts: dict[UUID, PostRow] = {}
         self._admin_user_ids: set[str] = admin_user_ids or set()
+        # State for the `sizuru-post admin ...` fakes below — a distinct
+        # concept from `_admin_user_ids` (is_admin() membership checks).
+        self._auth_users: dict[UUID, str] = {}  # user_id -> email
+        self._admin_users: dict[UUID, AdminUserRow] = {}  # user_id -> admin_users row
+        # Tests set these to simulate insert_admin_user()/delete_auth_user()
+        # failing, to exercise create_admin_account's rollback and the
+        # rollback-also-fails case (see tests/test_admin_accounts.py).
+        self.insert_admin_user_exception: Exception | None = None
+        self.delete_auth_user_exception: Exception | None = None
 
     def upsert_channels(self, channels: list[dict[str, Any]]) -> None:
         valid = [c for c in channels if c.get("service") in VALID_CHANNEL_SERVICES]
@@ -172,6 +183,33 @@ class InMemoryRepo:
 
     def is_admin(self, user_id: str) -> bool:
         return user_id in self._admin_user_ids
+
+    def create_auth_user(self, *, email: str, password: str) -> UUID:
+        if any(existing_email == email for existing_email in self._auth_users.values()):
+            raise AuthUserAlreadyExistsError(f"既にアカウントが存在します: {email}")
+        user_id = uuid4()
+        self._auth_users[user_id] = email
+        return user_id
+
+    def delete_auth_user(self, user_id: UUID) -> None:
+        if self.delete_auth_user_exception is not None:
+            raise self.delete_auth_user_exception
+        self._auth_users.pop(user_id, None)
+
+    def insert_admin_user(self, *, user_id: UUID, email: str, display_name: str | None) -> None:
+        if self.insert_admin_user_exception is not None:
+            raise self.insert_admin_user_exception
+        self._admin_users[user_id] = AdminUserRow(user_id=user_id, email=email, display_name=display_name)
+
+    def find_admin_user_id_by_email(self, email: str) -> UUID | None:
+        return next((uid for uid, row in self._admin_users.items() if row.email == email), None)
+
+    def update_auth_user_password(self, user_id: UUID, password: str) -> None:
+        if user_id not in self._auth_users:
+            raise ValueError(f"unknown auth user: {user_id}")
+
+    def list_admin_users(self) -> list[AdminUserRow]:
+        return list(self._admin_users.values())
 
 
 @dataclass

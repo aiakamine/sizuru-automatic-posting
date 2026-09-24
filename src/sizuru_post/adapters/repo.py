@@ -22,12 +22,21 @@ from uuid import UUID
 
 from postgrest.exceptions import APIError
 from pydantic import BaseModel, Field
+from supabase_auth.errors import AuthApiError
 
 from sizuru_post.domain.models import PostStatus
 
 # The Postgres SQLSTATE for a unique-constraint violation, surfaced by
 # PostgREST as APIError.code — see create_submission()/UniqueViolationError.
 _UNIQUE_VIOLATION_CODE = "23505"
+
+# Supabase Admin Auth API error codes seen for a duplicate-email
+# auth.admin.create_user() call — see SupabaseRepo.create_auth_user().
+# "email_exists" is what Supabase's admin create-user endpoint actually
+# returns as of this writing; "user_already_exists" is kept too since it's
+# the code used by the (differently-triggered) public signup endpoint and
+# the exact string isn't part of any documented contract.
+_AUTH_EMAIL_EXISTS_CODES = {"email_exists", "user_already_exists"}
 
 
 class UniqueViolationError(ValueError):
@@ -37,6 +46,12 @@ class UniqueViolationError(ValueError):
     get_submission_by_s3_key() instead of treating this as a failure. A
     ValueError subclass so any existing broad `except ValueError` call
     site still behaves sanely if it doesn't specifically handle this."""
+
+
+class AuthUserAlreadyExistsError(ValueError):
+    """create_auth_user(): Supabase already has an auth user with this
+    email — the caller (admin_accounts.create_admin_account) must not
+    overwrite/reset it."""
 
 # --- Schema surface: table & column names --------------------------------
 # Every Supabase query below references these constants instead of inline
@@ -118,6 +133,13 @@ class PostRow(BaseModel):
     retry_count: int = 0
     created_at: datetime | None = None
     updated_at: datetime | None = None
+
+
+class AdminUserRow(BaseModel):
+    user_id: UUID
+    email: str
+    display_name: str | None = None
+    created_at: datetime | None = None
 
 
 class Repo(Protocol):
@@ -420,3 +442,41 @@ class SupabaseRepo:
     def is_admin(self, user_id: str) -> bool:
         response = self._client.table(TABLE_ADMIN_USERS).select("user_id").eq("user_id", user_id).execute()
         return bool(response.data)
+
+    # --- admin account management (sizuru-post admin ...) -----------------
+    # See sizuru_post.admin_accounts for the id/email/password rules and the
+    # create/reset/list orchestration that calls these.
+
+    def create_auth_user(self, *, email: str, password: str) -> UUID:
+        try:
+            response = self._client.auth.admin.create_user(
+                {"email": email, "password": password, "email_confirm": True}
+            )
+        except AuthApiError as exc:
+            if exc.code in _AUTH_EMAIL_EXISTS_CODES:
+                raise AuthUserAlreadyExistsError(f"既にアカウントが存在します: {email}") from exc
+            raise
+        return UUID(str(response.user.id))
+
+    def delete_auth_user(self, user_id: UUID) -> None:
+        self._client.auth.admin.delete_user(str(user_id))
+
+    def insert_admin_user(self, *, user_id: UUID, email: str, display_name: str | None) -> None:
+        payload = _serialize({"user_id": user_id, "email": email, "display_name": display_name})
+        self._client.table(TABLE_ADMIN_USERS).insert(payload).execute()
+
+    def find_admin_user_id_by_email(self, email: str) -> UUID | None:
+        """Resolve an email to its `admin_users.user_id` — deliberately
+        NOT a scan of the whole auth.users directory (auth.admin.list_users):
+        `reset_admin_password` must only ever be able to reset an account
+        that's actually in `admin_users`, never an arbitrary auth user."""
+        response = self._client.table(TABLE_ADMIN_USERS).select("user_id").eq("email", email).execute()
+        rows = response.data or []
+        return UUID(str(rows[0]["user_id"])) if rows else None
+
+    def update_auth_user_password(self, user_id: UUID, password: str) -> None:
+        self._client.auth.admin.update_user_by_id(str(user_id), {"password": password})
+
+    def list_admin_users(self) -> list[AdminUserRow]:
+        response = self._client.table(TABLE_ADMIN_USERS).select("*").execute()
+        return [AdminUserRow.model_validate(row) for row in response.data or []]

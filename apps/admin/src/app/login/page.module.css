@@ -89,3 +89,18 @@
   color: var(--err);
   background: var(--err-soft);
 }
+
+.linkButton {
+  justify-self: start;
+  border: none;
+  background: none;
+  padding: 0;
+  color: var(--primary);
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.linkButton:hover {
+  text-decoration: underline;
+}

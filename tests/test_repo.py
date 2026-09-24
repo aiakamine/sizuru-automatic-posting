@@ -12,8 +12,9 @@ from uuid import uuid4
 
 import pytest
 from postgrest.exceptions import APIError
+from supabase_auth.errors import AuthApiError
 
-from sizuru_post.adapters.repo import SupabaseRepo, UniqueViolationError
+from sizuru_post.adapters.repo import AuthUserAlreadyExistsError, SupabaseRepo, UniqueViolationError
 from sizuru_post.domain.models import PostStatus
 
 
@@ -653,3 +654,142 @@ def test_list_posts_in_range_flattens_embedded_channel_and_submission_title() ->
     assert rows[0].service == "tiktok"
     assert rows[0].status == "scheduled"
     assert rows[0].title == "My clip"
+
+
+class TestCreateAuthUser:
+    def test_creates_the_user_via_the_admin_api_and_returns_its_id(self) -> None:
+        # Arrange
+        user_id = uuid4()
+        client = MagicMock()
+        client.auth.admin.create_user.return_value = MagicMock(user=MagicMock(id=str(user_id)))
+        repo = SupabaseRepo(client)
+
+        # Act
+        result = repo.create_auth_user(email="sizuru-admin1@sizuru.local", password="p4ssword-xyz")
+
+        # Assert
+        client.auth.admin.create_user.assert_called_once_with(
+            {"email": "sizuru-admin1@sizuru.local", "password": "p4ssword-xyz", "email_confirm": True}
+        )
+        assert result == user_id
+
+    def test_raises_a_dedicated_error_when_the_email_already_exists(self) -> None:
+        # Arrange
+        client = MagicMock()
+        client.auth.admin.create_user.side_effect = AuthApiError("Email already registered", 422, "email_exists")
+        repo = SupabaseRepo(client)
+
+        # Act / Assert
+        with pytest.raises(AuthUserAlreadyExistsError):
+            repo.create_auth_user(email="sizuru-admin1@sizuru.local", password="p4ssword-xyz")
+
+    def test_reraises_other_auth_api_errors_unchanged(self) -> None:
+        # Arrange
+        client = MagicMock()
+        client.auth.admin.create_user.side_effect = AuthApiError("boom", 500, "unexpected_failure")
+        repo = SupabaseRepo(client)
+
+        # Act / Assert
+        with pytest.raises(AuthApiError):
+            repo.create_auth_user(email="sizuru-admin1@sizuru.local", password="p4ssword-xyz")
+
+
+class TestDeleteAuthUser:
+    def test_calls_the_admin_api_with_the_user_id(self) -> None:
+        # Arrange
+        user_id = uuid4()
+        client = MagicMock()
+        repo = SupabaseRepo(client)
+
+        # Act
+        repo.delete_auth_user(user_id)
+
+        # Assert
+        client.auth.admin.delete_user.assert_called_once_with(str(user_id))
+
+
+class TestInsertAdminUser:
+    def test_inserts_into_the_admin_users_table(self) -> None:
+        # Arrange
+        user_id = uuid4()
+        client = MagicMock()
+        table = _query_mock([])
+        client.table.return_value = table
+        repo = SupabaseRepo(client)
+
+        # Act
+        repo.insert_admin_user(user_id=user_id, email="sizuru-admin1@sizuru.local", display_name="管理者1")
+
+        # Assert
+        client.table.assert_called_with("admin_users")
+        table.insert.assert_called_once_with(
+            {"user_id": str(user_id), "email": "sizuru-admin1@sizuru.local", "display_name": "管理者1"}
+        )
+
+
+class TestFindAdminUserIdByEmail:
+    def test_returns_the_admin_users_row_user_id(self) -> None:
+        # Arrange: must resolve via the admin_users TABLE, never a scan of
+        # the whole auth.users directory — reset_admin_password relies on
+        # this to never touch a non-admin auth user (see admin_accounts.py).
+        user_id = uuid4()
+        client = MagicMock()
+        table = _query_mock([{"user_id": str(user_id)}])
+        client.table.return_value = table
+        repo = SupabaseRepo(client)
+
+        # Act
+        result = repo.find_admin_user_id_by_email("sizuru-admin1@sizuru.local")
+
+        # Assert
+        client.table.assert_called_with("admin_users")
+        table.eq.assert_called_once_with("email", "sizuru-admin1@sizuru.local")
+        assert result == user_id
+
+    def test_returns_none_when_no_admin_row_matches(self) -> None:
+        # Arrange
+        client = MagicMock()
+        table = _query_mock([])
+        client.table.return_value = table
+        repo = SupabaseRepo(client)
+
+        # Act
+        result = repo.find_admin_user_id_by_email("no-such-admin@sizuru.local")
+
+        # Assert
+        assert result is None
+
+
+class TestUpdateAuthUserPassword:
+    def test_calls_the_admin_api_with_the_new_password(self) -> None:
+        # Arrange
+        user_id = uuid4()
+        client = MagicMock()
+        repo = SupabaseRepo(client)
+
+        # Act
+        repo.update_auth_user_password(user_id, "new-p4ssword")
+
+        # Assert
+        client.auth.admin.update_user_by_id.assert_called_once_with(str(user_id), {"password": "new-p4ssword"})
+
+
+class TestListAdminUsers:
+    def test_returns_rows_from_the_admin_users_table(self) -> None:
+        # Arrange
+        user_id = uuid4()
+        client = MagicMock()
+        table = _query_mock(
+            [{"user_id": str(user_id), "email": "sizuru-admin1@sizuru.local", "display_name": "管理者1"}]
+        )
+        client.table.return_value = table
+        repo = SupabaseRepo(client)
+
+        # Act
+        rows = repo.list_admin_users()
+
+        # Assert
+        client.table.assert_called_with("admin_users")
+        assert len(rows) == 1
+        assert rows[0].user_id == user_id
+        assert rows[0].display_name == "管理者1"

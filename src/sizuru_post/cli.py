@@ -17,6 +17,15 @@ import typer
 from pydantic import ValidationError
 
 from sizuru_post.adapters.buffer import BufferAmbiguousError, BufferProtocolError
+from sizuru_post.admin_accounts import (
+    AdminAccountRollbackError,
+    AdminUserNotFoundError,
+    InvalidLoginIdError,
+    LoginIdAlreadyExistsError,
+    create_admin_account,
+    list_admin_accounts,
+    reset_admin_password,
+)
 from sizuru_post.channels_sync import NoBufferOrganizationError, sync_channels
 from sizuru_post.config import Settings
 from sizuru_post.domain.models import PublishRequest
@@ -36,6 +45,9 @@ from sizuru_post.serialization import (
 # environment at import time and can leak stale/empty values (e.g. an
 # empty AWS_PROFILE) into unrelated code that reads os.environ directly.
 app = typer.Typer(help="TikTok / Instagram Reels / X への投稿を Buffer 経由で行う CLI")
+
+admin_app = typer.Typer(help="管理画面にログインできる管理者アカウントを管理する")
+app.add_typer(admin_app, name="admin")
 
 
 def _load_settings() -> Settings:
@@ -250,3 +262,59 @@ def introspect(
         out.write_text(text)
     else:
         typer.echo(text)
+
+
+# --- admin account management ---------------------------------------------------------
+
+
+@admin_app.command("add")
+def admin_add(
+    login_id: str,
+    display_name: Annotated[str | None, typer.Option("--display-name", help="表示名")] = None,
+) -> None:
+    """管理者アカウントを新規作成し、ID・メール・パスワードを一度だけ表示する。
+
+    パスワードはここでしか表示されない（どこにも保存しない）。忘れた場合は
+    `admin reset-password` で再発行すること。
+    """
+    settings = _load_settings()
+    repo = build_repo(settings)
+    try:
+        account = create_admin_account(repo, login_id=login_id, display_name=display_name)
+    except (InvalidLoginIdError, LoginIdAlreadyExistsError, AdminAccountRollbackError) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
+
+    _print_json(
+        {
+            "id": account.login_id,
+            "email": account.email,
+            "display_name": account.display_name,
+            "password": account.password,
+        }
+    )
+
+
+@admin_app.command("reset-password")
+def admin_reset_password(login_id: str) -> None:
+    """既存の管理者アカウントのパスワードを再発行し、一度だけ表示する。"""
+    settings = _load_settings()
+    repo = build_repo(settings)
+    try:
+        reset = reset_admin_password(repo, login_id=login_id)
+    except (InvalidLoginIdError, AdminUserNotFoundError) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
+
+    _print_json({"id": reset.login_id, "email": reset.email, "password": reset.password})
+
+
+@admin_app.command("list")
+def admin_list() -> None:
+    """管理者アカウント一覧を表示する（パスワードは含まない）。"""
+    settings = _load_settings()
+    repo = build_repo(settings)
+    accounts = list_admin_accounts(repo)
+    _print_json(
+        [{"id": a.login_id, "email": a.email, "display_name": a.display_name} for a in accounts]
+    )

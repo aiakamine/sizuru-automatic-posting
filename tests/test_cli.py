@@ -484,3 +484,155 @@ class TestChannelsCommand:
         assert result.exit_code == 0
         updated_stale = next(c for c in repo.list_channels() if c.id == stale.id)
         assert updated_stale.is_disconnected is True
+
+
+class TestAdminAddCommand:
+    def test_creates_an_account_and_prints_the_password_once(
+        self, monkeypatch: pytest.MonkeyPatch, repo: InMemoryRepo
+    ) -> None:
+        # Arrange
+        monkeypatch.setattr(cli_module, "build_repo", lambda settings: repo)
+
+        # Act
+        result = runner.invoke(cli_module.app, ["admin", "add", "sizuru-admin1", "--display-name", "管理者1"])
+
+        # Assert
+        assert result.exit_code == 0
+        payload = json.loads(result.output)
+        assert payload["id"] == "sizuru-admin1"
+        assert payload["email"] == "sizuru-admin1@sizuru.local"
+        assert payload["display_name"] == "管理者1"
+        assert len(payload["password"]) == 16
+        assert len(repo.list_admin_users()) == 1
+
+    def test_invalid_login_id_exits_one(self, monkeypatch: pytest.MonkeyPatch, repo: InMemoryRepo) -> None:
+        # Arrange
+        monkeypatch.setattr(cli_module, "build_repo", lambda settings: repo)
+
+        # Act
+        result = runner.invoke(cli_module.app, ["admin", "add", "AB"])
+
+        # Assert
+        assert result.exit_code == 1
+        assert repo.list_admin_users() == []
+
+    def test_duplicate_login_id_exits_one_without_overwriting(
+        self, monkeypatch: pytest.MonkeyPatch, repo: InMemoryRepo
+    ) -> None:
+        # Arrange
+        monkeypatch.setattr(cli_module, "build_repo", lambda settings: repo)
+        first = runner.invoke(cli_module.app, ["admin", "add", "sizuru-admin1", "--display-name", "管理者1"])
+        assert first.exit_code == 0
+
+        # Act
+        second = runner.invoke(cli_module.app, ["admin", "add", "sizuru-admin1", "--display-name", "別名"])
+
+        # Assert
+        assert second.exit_code == 1
+        rows = repo.list_admin_users()
+        assert len(rows) == 1
+        assert rows[0].display_name == "管理者1"
+
+    def test_normalizes_login_id_case_and_whitespace(
+        self, monkeypatch: pytest.MonkeyPatch, repo: InMemoryRepo
+    ) -> None:
+        # Arrange
+        monkeypatch.setattr(cli_module, "build_repo", lambda settings: repo)
+
+        # Act
+        result = runner.invoke(cli_module.app, ["admin", "add", "  Sizuru-Admin1  "])
+
+        # Assert
+        assert result.exit_code == 0
+        assert json.loads(result.output)["id"] == "sizuru-admin1"
+
+    def test_rollback_failure_exits_one_with_details_on_stderr(
+        self, monkeypatch: pytest.MonkeyPatch, repo: InMemoryRepo
+    ) -> None:
+        # Arrange: both the admin_users insert and the rollback delete fail
+        # — the CLI must surface this (not swallow it) and exit non-zero.
+        monkeypatch.setattr(cli_module, "build_repo", lambda settings: repo)
+        repo.insert_admin_user_exception = RuntimeError("db down")
+        repo.delete_auth_user_exception = RuntimeError("network down")
+
+        # Act
+        result = runner.invoke(cli_module.app, ["admin", "add", "sizuru-admin1"])
+
+        # Assert
+        assert result.exit_code == 1
+        assert "db down" in result.output
+        assert "network down" in result.output
+
+
+class TestAdminResetPasswordCommand:
+    def test_reissues_the_password_for_an_existing_account(
+        self, monkeypatch: pytest.MonkeyPatch, repo: InMemoryRepo
+    ) -> None:
+        # Arrange
+        monkeypatch.setattr(cli_module, "build_repo", lambda settings: repo)
+        runner.invoke(cli_module.app, ["admin", "add", "sizuru-admin1"])
+
+        # Act
+        result = runner.invoke(cli_module.app, ["admin", "reset-password", "sizuru-admin1"])
+
+        # Assert
+        assert result.exit_code == 0
+        payload = json.loads(result.output)
+        assert payload["id"] == "sizuru-admin1"
+        assert payload["email"] == "sizuru-admin1@sizuru.local"
+        assert len(payload["password"]) == 16
+
+    def test_unknown_login_id_exits_one(self, monkeypatch: pytest.MonkeyPatch, repo: InMemoryRepo) -> None:
+        # Arrange
+        monkeypatch.setattr(cli_module, "build_repo", lambda settings: repo)
+
+        # Act
+        result = runner.invoke(cli_module.app, ["admin", "reset-password", "no-such-admin"])
+
+        # Assert
+        assert result.exit_code == 1
+
+    def test_does_not_reset_an_auth_user_that_is_not_an_admin(
+        self, monkeypatch: pytest.MonkeyPatch, repo: InMemoryRepo
+    ) -> None:
+        # Arrange: SECURITY regression — an auth user exists for this email
+        # but was never added to admin_users.
+        monkeypatch.setattr(cli_module, "build_repo", lambda settings: repo)
+        repo.create_auth_user(email="sizuru-admin1@sizuru.local", password="whatever-not-admin1")
+
+        # Act
+        result = runner.invoke(cli_module.app, ["admin", "reset-password", "sizuru-admin1"])
+
+        # Assert
+        assert result.exit_code == 1
+
+    def test_normalizes_login_id_case_and_whitespace(
+        self, monkeypatch: pytest.MonkeyPatch, repo: InMemoryRepo
+    ) -> None:
+        # Arrange
+        monkeypatch.setattr(cli_module, "build_repo", lambda settings: repo)
+        runner.invoke(cli_module.app, ["admin", "add", "sizuru-admin1"])
+
+        # Act
+        result = runner.invoke(cli_module.app, ["admin", "reset-password", "  Sizuru-Admin1  "])
+
+        # Assert
+        assert result.exit_code == 0
+        assert json.loads(result.output)["id"] == "sizuru-admin1"
+
+
+class TestAdminListCommand:
+    def test_lists_accounts_without_passwords(self, monkeypatch: pytest.MonkeyPatch, repo: InMemoryRepo) -> None:
+        # Arrange
+        monkeypatch.setattr(cli_module, "build_repo", lambda settings: repo)
+        runner.invoke(cli_module.app, ["admin", "add", "sizuru-admin1", "--display-name", "管理者1"])
+        runner.invoke(cli_module.app, ["admin", "add", "sizuru-admin2", "--display-name", "管理者2"])
+
+        # Act
+        result = runner.invoke(cli_module.app, ["admin", "list"])
+
+        # Assert
+        assert result.exit_code == 0
+        payload = json.loads(result.output)
+        assert {row["id"] for row in payload} == {"sizuru-admin1", "sizuru-admin2"}
+        assert all("password" not in row for row in payload)

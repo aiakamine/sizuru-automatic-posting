@@ -203,10 +203,40 @@ The browser reads `submissions`/`posts`/`channels` directly via
 Supabase RLS (`is_admin()`), and the API additionally checks
 `admin_users` server-side (`Repo.is_admin`) before allowing an
 edit/cancel/sync request. A user must exist in **both** `auth.users`
-(via a real login) and `admin_users` to do anything:
+and `admin_users` to do anything.
 
-1. Have the admin (`kiyoto_hata@levela.co.jp`) sign in once via the
-   frontend's magic-link login — this creates their `auth.users` row.
+### Dummy login accounts (`sizuru-admin1`, ...): `sizuru-post admin`
+
+For accounts that log in with a short id + password (not a real
+email), use the CLI — it creates both rows (`auth.users` via the
+Supabase Admin API, then `admin_users`) as a single transaction, and
+never overwrites an existing account:
+
+```bash
+# Create one. The password is printed ONCE — copy it now, it is never
+# logged or stored anywhere else.
+uv run sizuru-post admin add sizuru-admin1 --display-name 管理者1
+
+# Forgot the password? Reissue it (dummy ids have no email to reset via).
+uv run sizuru-post admin reset-password sizuru-admin1
+
+# List existing admins (no passwords).
+uv run sizuru-post admin list
+```
+
+The frontend maps an id without `@` to `<id>@sizuru.local` and signs in
+with `auth.signInWithPassword({ email, password })` — `admin add`'s id
+validation (`^[a-z0-9][a-z0-9-]{2,31}$`) and email mapping must match
+this exactly (see `sizuru_post.admin_accounts`).
+
+### A real email (e.g. `kiyoto_hata@levela.co.jp`): manual steps (fallback)
+
+For an admin who signs in via the frontend's own email/magic-link
+login instead of a dummy id, there's no password to generate — insert
+the `admin_users` row manually once they've logged in at least once:
+
+1. Have the admin sign in once via the frontend's magic-link login —
+   this creates their `auth.users` row.
 2. Find their `auth.users.id` (Supabase dashboard → Authentication →
    Users, or `select id from auth.users where email = '...'`).
 3. Insert the `admin_users` row (SQL editor, or `psql`):
@@ -215,6 +245,12 @@ edit/cancel/sync request. A user must exist in **both** `auth.users`
    insert into public.admin_users (user_id, email, display_name)
    values ('<uuid from step 2>', 'kiyoto_hata@levela.co.jp', 'Kiyoto Hata');
    ```
+
+   (`sizuru-post admin add` also works here if you pass the real email
+   as the id — the id validation lets anything containing `@` through
+   — but it additionally creates the `auth.users` row via a generated
+   password, which this admin doesn't need since they log in with a
+   magic link.)
 
 ## 6. Build and upload the frontend
 
@@ -225,6 +261,11 @@ NEXT_PUBLIC_SUPABASE_URL=https://hdqrvhnhlyykocphetfg.supabase.co \
 NEXT_PUBLIC_SUPABASE_ANON_KEY=<Supabase anon/public key, NOT the service_role key> \
 NEXT_PUBLIC_API_URL=<ApiUrl output from step 3> \
   yarn build   # Next.js `output: "export"` — produces apps/admin/out/
+               # (`build` runs `next build --webpack`: Turbopack production
+               #  builds currently fail on this repo with "Module not found:
+               #  Can't resolve '@vercel/turbopack-next/internal/font/google/font'"
+               #  for the next/font/google fonts in src/app/layout.tsx, so we
+               #  pin the build to webpack until that's fixed upstream.)
 
 aws s3 sync apps/admin/out s3://<FrontendBucket output> --delete
 
