@@ -3,6 +3,9 @@
 ローカルの9:16 MP4クリップを、Buffer GraphQL API経由でTikTok / Instagram Reels / X に
 自動投稿するCLIツール（`sizuru-post`）です。投稿は常に人間の承認を経てから実行されます。
 
+**Claude Codeスキル（切り抜き作成・予約投稿）を使うだけの人は
+[docs/team-setup.md](docs/team-setup.md) を参照してください。** Buffer/S3/Supabaseの秘密鍵は不要です。
+
 ## 概要
 
 ```
