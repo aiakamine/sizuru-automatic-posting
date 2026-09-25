@@ -6,6 +6,35 @@
 **Claude Codeスキル（切り抜き作成・予約投稿）を使うだけの人は
 [docs/team-setup.md](docs/team-setup.md) を参照してください。** Buffer/S3/Supabaseの秘密鍵は不要です。
 
+### スキル利用者：予約 API のキーの入れ方
+
+スキルに必要なのは、管理者から個別に受け取る2行（`SIZURU_API_URL` と `SIZURU_API_KEY`）だけです。
+AWS のアカウント・権限や Buffer の API キーは要りません（Buffer のキーは AWS 側に保管され、予約 API が使います）。
+
+1. リポジトリのフォルダで設定ファイルを作る
+
+   ```bash
+   cp .env.example .env
+   ```
+
+2. `.env` をエディタで開き、先頭の「スキル利用者」欄の2行を、受け取った値に書き換えて保存する
+
+   ```
+   SIZURU_API_URL=https://4ynlgoe3h2.execute-api.ap-northeast-1.amazonaws.com
+   SIZURU_API_KEY=（受け取ったキーを貼る）
+   ```
+
+3. 環境チェックを実行し、すべて ✅ になることを確認する（キーの値は表示されません）
+
+   ```bash
+   bash scripts/check_skill_env.sh
+   ```
+
+   `SIZURU_API_KEY` の行が ❌ なら空欄、「サーバー疎通確認」が 401 ならキーの貼り間違いです。
+
+- `.env` は `.gitignore` 済みなのでコミットされません。キーは他人と共有せず、Slack の共有チャンネルなどにも貼らないでください
+- キーが漏れた・入れ替える場合は管理者に連絡してください（AWS 側で差し替えると約5分で古いキーは使えなくなります）
+
 ## 概要
 
 ```
