@@ -64,6 +64,28 @@ describe("xWeightedLength", () => {
     const elapsed = performance.now() - start;
     expect(elapsed).toBeLessThan(1000);
   });
+
+  // 週カレンダーの「main-thread が数秒固まる」調査（2026-09-24）で、
+  // twitter-text の正規表現が原因ではないかという疑いがあったため、
+  // 実際に踏みうる「重そうな」入力パターンでも劣化しないことを個別に固定する。
+  it("stays fast for many ZWJ emoji sequences (family emoji x500)", () => {
+    const family = "\u{1F468}‍\u{1F469}‍\u{1F467}‍\u{1F466}";
+    const start = performance.now();
+    xWeightedLength(family.repeat(500));
+    const elapsed = performance.now() - start;
+    expect(elapsed).toBeLessThan(1000);
+  });
+
+  it("stays fast for many URLs in one caption (50 URLs)", () => {
+    const manyUrls = Array.from(
+      { length: 50 },
+      (_, i) => `https://example.com/path/${i}/very-long-segment-name-here`,
+    ).join(" ");
+    const start = performance.now();
+    xWeightedLength(manyUrls);
+    const elapsed = performance.now() - start;
+    expect(elapsed).toBeLessThan(1000);
+  });
 });
 
 describe("captionLength", () => {

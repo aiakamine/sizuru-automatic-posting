@@ -7,6 +7,10 @@
 .main {
   padding: var(--space-7) 28px;
   display: grid;
+  /* grid-template-columns を指定しないと暗黙の1列（auto）になり、その列の幅は
+     中身（WeekBoard 等）の intrinsic サイズに引っ張られうる。minmax(0, 1fr) で
+     常にこのコンテナ自身の幅（216px 1fr の右側）に固定する。 */
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--space-6);
   align-content: start;
   min-width: 0;

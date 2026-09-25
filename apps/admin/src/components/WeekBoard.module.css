@@ -9,6 +9,12 @@
 }
 
 .day {
+  /* グリッドアイテムの既定 min-width は auto（中身の min-content 分だけ縮まない）。
+     カード内の長いキャプション・URL 等、折り返せないテキストがあると、この日カラムの
+     min-content がそのまま `.week` の列幅を押し広げてしまう（week 列自体は
+     `minmax(168px, 1fr)` でも、アイテムの自動最小サイズがそれを上書きしうる）。
+     0 に固定して、内側の内容量が外側の列幅に影響しないようにする。 */
+  min-width: 0;
   border-left: var(--border);
   min-height: 480px;
   display: flex;
@@ -50,6 +56,9 @@
 .dayBody {
   padding: var(--space-3);
   display: grid;
+  /* 列を明示しないと暗黙の1列トラックが子（PostCard）の min-content で広がる。
+     minmax(0, 1fr) でカラム幅を常にこのコンテナの実際の幅に合わせる。 */
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--space-3);
   align-content: start;
 }

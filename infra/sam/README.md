@@ -267,7 +267,17 @@ NEXT_PUBLIC_API_URL=<ApiUrl output from step 3> \
                #  for the next/font/google fonts in src/app/layout.tsx, so we
                #  pin the build to webpack until that's fixed upstream.)
 
-aws s3 sync apps/admin/out s3://<FrontendBucket output> --delete
+# Hashed asset filenames under _next/static/ never change contents, so they can
+# be cached forever; everything else (HTML, RSC .txt payloads) must be
+# revalidated on every deploy or browsers keep serving a stale page indefinitely
+# via heuristic caching (this bit us once: users kept seeing the old
+# email-only login page after a deploy because these objects had no
+# Cache-Control at all).
+aws s3 sync apps/admin/out s3://<FrontendBucket output> --delete \
+  --cache-control "no-cache" --exclude "_next/static/*"
+
+aws s3 sync apps/admin/out/_next/static s3://<FrontendBucket output>/_next/static \
+  --cache-control "public, max-age=31536000, immutable"
 
 aws cloudfront create-invalidation \
   --distribution-id <CloudFront distribution ID, from the console or
@@ -276,7 +286,7 @@ aws cloudfront create-invalidation \
   --paths '/*'
 ```
 
-Re-run the `s3 sync` + invalidation on every frontend change; the Lambdas
+Re-run both `s3 sync` commands + invalidation on every frontend change; the Lambdas
 redeploy independently via `sam deploy` (step 3).
 
 ## Updating secrets later

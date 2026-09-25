@@ -1,9 +1,14 @@
 .slot {
+  /* WeekBoard.module.css の .day と同じ理由: このカード自身も dayBody の
+     グリッドアイテムであり、かつ自身も display:grid のコンテナ。両側で
+     min-content によるはみ出しを止めるため、min-width と暗黙列を明示的に固定する。 */
+  min-width: 0;
   border: var(--border);
   border-radius: var(--radius-md);
   background: var(--surface);
   padding: var(--space-3);
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--space-2);
   text-align: left;
   width: 100%;
@@ -59,7 +64,9 @@
 
 .media {
   display: grid;
-  grid-template-columns: 48px 1fr;
+  /* サムネ 48px + 残り全部。1fr のまま（min-width:auto）だと、URL やハッシュタグ連結など
+     折り返せない文字列があるとき、テキスト側の列がそのぶん膨らんでカードごとはみ出す。 */
+  grid-template-columns: 48px minmax(0, 1fr);
   gap: var(--space-3);
   align-items: start;
 }
@@ -71,6 +78,7 @@
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
+  overflow-wrap: anywhere;
   margin: 0;
 }
 
@@ -83,6 +91,7 @@
   -webkit-line-clamp: 3;
   -webkit-box-orient: vertical;
   overflow: hidden;
+  overflow-wrap: anywhere;
 }
 
 .foot {
