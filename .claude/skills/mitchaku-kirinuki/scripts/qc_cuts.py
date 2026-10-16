@@ -45,11 +45,13 @@ def load_timeline(out_dir, filename):
 
 
 def _checkpoint(cut, cut_index, label, offset_in_cut):
+    src_frame = cut["src_start_frame"] + offset_in_cut
     return {
         "cut": cut_index,
         "label": label,
         "out_frame": cut["out_start_frame"] + offset_in_cut,
-        "src_time": (cut["src_start_frame"] + offset_in_cut) / FPSF,
+        "src_frame": src_frame,
+        "src_time": src_frame / FPSF,
     }
 
 
@@ -112,9 +114,39 @@ def load_telops(path):
 
 
 def expected_telop_at(rows, t):
-    """時刻 t に表示されているはずのテロップ本文を返す（該当が無ければ空文字列）。"""
+    """時刻 t に表示されているはずのテロップ本文を返す（該当が無ければ空文字列）。
+    行は隙間なく連続するので半開区間 start <= t < end で引く（境界ちょうどは次の行）。"""
     for start, end, text in rows:
-        if start <= t <= end:
+        if start <= t < end:
+            return text
+    return ""
+
+
+# subscan.py の書式からフレーム番号を読む: "{start:8.3f} {end:8.3f} f{a:6d}-{b:6d} {text}"
+_TELOP_FRAME_RE = re.compile(r"^\s*\S+\s+\S+\s+f\s*(\d+)-\s*(\d+)\s(.*)$")
+
+
+def load_telop_frames(path):
+    """telops.txt を [(開始フレーム, 終了フレーム, text), ...]（開始フレーム昇順）で返す。
+    秒は小数3桁に丸められているため、境界の判定は丸めの無いフレーム番号で行う。"""
+    rows = []
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            match = _TELOP_FRAME_RE.match(line.rstrip("\n"))
+            if not match:
+                continue
+            a, b, text = match.groups()
+            rows.append((int(a), int(b), text.strip()))
+    rows.sort(key=lambda r: r[0])
+    return rows
+
+
+def expected_telop_at_frame(rows, frame):
+    """元データのフレーム番号 frame に表示されているはずのテロップ本文を返す。
+    半開区間 開始 <= frame < 終了 で引く。カット頭（新しいテロップの最初のフレーム）を
+    直前の行として扱う誤判定を防ぐ（2026-10-13 凪さん密着で毎回8〜11件出ていた）。"""
+    for a, b, text in rows:
+        if a <= frame < b:
             return text
     return ""
 
@@ -255,7 +287,7 @@ def check_clip(clip_index, clip, args, telop_rows, tmp_dir):
 
     results = []
     for png, point in zip(frame_paths, points):
-        expected = expected_telop_at(telop_rows, point["src_time"])
+        expected = expected_telop_at_frame(telop_rows, point["src_frame"])
         ok, reason = judge_point(expected, png, ocr, ocr_failed)
         row = "%s c%d %-6s out_frame=%6d src=%8.3fs %s" % (
             clip["file"], point["cut"], point["label"],
@@ -267,7 +299,7 @@ def check_clip(clip_index, clip, args, telop_rows, tmp_dir):
 def main(argv):
     args = parse_args(argv)
     M = load_clips_plan(args.clips_plan)
-    telop_rows = load_telops(args.telops)
+    telop_rows = load_telop_frames(args.telops)
 
     all_ok = True
     with tempfile.TemporaryDirectory() as tmp_dir:

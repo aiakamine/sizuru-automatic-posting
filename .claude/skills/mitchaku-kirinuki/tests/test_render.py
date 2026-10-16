@@ -866,6 +866,38 @@ class FixLoudnessTest(unittest.TestCase):
         ffmpeg_calls = [c for c in calls if isinstance(c, list)]
         self.assertEqual(len(ffmpeg_calls), 1)
 
+    def test_uses_true_peak_limited_dynamic_loudnorm_when_headroom_blocks_volume(self):
+        # Arrange: 2026-10-12 凪さん密着02の実データ。linearのloudnormでは-15.1のまま上がらず、
+        # True Peakに余裕が無いのでvolumeのゲインもほぼ0dBにクランプされ、許容(±0.5LU)外の
+        # まま打ち切られていた。手動でloudnormの動的モード(TPで頭を抑えつつ持ち上げる)を
+        # 掛けたら-14.2に収まった。この場合だけ動的モードの補正を1回だけ追加する。
+        stats = {"input_i": "-15.17", "input_tp": "-1.37", "input_lra": "3.90",
+                 "input_thresh": "-25.85", "target_offset": "0.56"}
+        measurements = iter([
+            {"integrated": -15.17, "true_peak": -1.37},  # 初回判定
+            {"integrated": -15.10, "true_peak": -1.40},  # linear後（上がらない・TPに余裕なし）
+            {"integrated": -14.20, "true_peak": -1.10},  # 動的モード後
+        ])
+        calls, originals = self._patch(
+            measure_ebur128=lambda path: next(measurements),
+            measure_loudnorm=lambda path: stats)
+        try:
+            # Act
+            result = R.fix_loudness("out.mp4")
+        finally:
+            self._restore(originals)
+        # Assert: linear → (volumeはクランプで省略) → 動的モード の2回の再エンコードで収まる
+        self.assertTrue(result["applied"])
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["integrated"], -14.20)
+        ffmpeg_calls = [c for c in calls if isinstance(c, list)]
+        self.assertEqual(len(ffmpeg_calls), 2)
+        af1 = ffmpeg_calls[1][ffmpeg_calls[1].index("-af") + 1]
+        self.assertIn("loudnorm", af1)
+        self.assertIn("linear=false", af1)
+        self.assertIn("apad", af1)
+        self.assertEqual(ffmpeg_calls[1][ffmpeg_calls[1].index("-t") + 1], "6.006000")
+
     def test_stops_after_max_attempts_and_reports_unresolved_when_still_outside_tolerance(self):
         # Arrange: 2回補正してもなお外れている場合、3回目は行わない（無限に叩き直さない）。
         # 最終値-14.6は目標±0.5LU(LOUDNESS_TOLERANCE)を外れるため、ok=Falseで報告する。

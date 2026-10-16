@@ -69,7 +69,7 @@ hooks:
 ### 1. 素材とレイアウトの取得
 
 ```bash
-S="$CLAUDE_PROJECT_DIR/.claude/skills/taidan-kirinuki/scripts"
+S="$CLAUDE_PROJECT_DIR/.claude/skills/taidan-kirinuki/scripts"   # Bashでは $CLAUDE_PROJECT_DIR が空のことがある。空ならリポジトリの絶対パスで定義する
 D=<スクラッチパッド>/kirinuki
 
 # 本編。403が出たら --cookies-from-browser chrome で通る（player_client切替は360pしか取れない）

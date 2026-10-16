@@ -342,6 +342,17 @@ def build_volume_correction_af(gain_db):
     return "volume=%.2fdB,aresample=48000,apad" % gain_db
 
 
+def build_dynamic_correction_af(stats):
+    """最後の手段: True Peakの余裕が無くvolumeで上げられないまま許容外のときだけ使う、
+    loudnormの動的モード(linear=false)のaf文字列（純粋関数）。TPで頭を抑えつつ持ち上げる。
+    2026-10-12 凪さん密着02で-15.1 LUFSのまま未解決→この補正で-14.2に収まった。"""
+    return (
+        "loudnorm=I=%.1f:TP=-1.5:LRA=11:measured_I=%s:measured_TP=%s:"
+        "measured_LRA=%s:measured_thresh=%s:offset=%s:linear=false,aresample=48000,apad"
+    ) % (LOUDNESS_TARGET_I, stats["input_i"], stats["input_tp"],
+         stats["input_lra"], stats["input_thresh"], stats["target_offset"])
+
+
 def probe_video_frame_count(path):
     """実際に書き出された映像の総フレーム数を数える（回帰テストのtotal_frames突合にも使う）。"""
     cmd = ["ffprobe", "-v", "error", "-count_frames", "-select_streams", "v:0",
@@ -397,7 +408,15 @@ def fix_loudness(path):
             gain = clamp_gain_for_true_peak(
                 gain_to_target(summary["integrated"]), summary.get("true_peak"))
             if abs(gain) < MIN_MEANINGFUL_GAIN_DB:
-                break  # True Peakの余裕が無く安全にはこれ以上補正できない。無駄な再エンコードもしない
+                # True Peakの余裕が無くvolumeでは上げられない。許容内なら無駄な再エンコードをしない。
+                # 許容外のまま（未解決になる）ときだけ、動的モードのloudnormを1回だけ掛ける
+                if abs(summary["integrated"] - LOUDNESS_TARGET_I) <= LOUDNESS_TOLERANCE:
+                    break
+                af = build_dynamic_correction_af(measure_loudnorm(path))
+                remux_audio(path, af, duration)
+                applied = True
+                summary = measure_ebur128(path)
+                break
             af = build_volume_correction_af(gain)
         remux_audio(path, af, duration)
         applied = True

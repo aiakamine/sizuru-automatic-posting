@@ -161,6 +161,55 @@ class LoadTelopsTest(unittest.TestCase):
         # Act / Assert
         self.assertEqual(Q.expected_telop_at(rows, 700.0), "")
 
+    def test_expected_telop_at_boundary_time_belongs_to_next_row(self):
+        # Arrange: 前の行の end と次の行の start が同じ時刻（subscan の行は隙間なく連続する）
+        rows = [(634.501, 637.303, "364日間=0契約"), (637.303, 638.905, "次のテロップ")]
+        # Act / Assert: 境界ちょうどは次の行（半開区間 start <= t < end）
+        self.assertEqual(Q.expected_telop_at(rows, 637.303), "次のテロップ")
+
+
+class LoadTelopFramesTest(unittest.TestCase):
+    """2026-10-13 凪さん密着：カット頭（新しいテロップの最初のフレーム）で、閉区間検索が
+    直前の行を期待値にしてしまい、毎回8〜11件の誤NGが出た。フレーム番号で引き直す。"""
+
+    def _write(self, content):
+        f = tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False, encoding="utf-8")
+        f.write(content)
+        f.close()
+        self.addCleanup(os.unlink, f.name)
+        return f.name
+
+    def test_parses_frame_numbers_including_empty_text(self):
+        path = self._write(
+            " 794.193  794.394 f 23802- 23808 大阪に出る時の引っ越し代・家賃等\n"
+            " 794.394  797.297 f 23808- 23895 そこを父親代わりにやってる自分がいて\n"
+            " 797.297  800.099 f 23895- 23979 \n"
+        )
+        rows = Q.load_telop_frames(path)
+        self.assertEqual(rows[0], (23802, 23808, "大阪に出る時の引っ越し代・家賃等"))
+        self.assertEqual(rows[2], (23895, 23979, ""))
+
+    def test_boundary_frame_belongs_to_next_row(self):
+        rows = [(23802, 23808, "大阪に出る時の引っ越し代・家賃等"),
+                (23808, 23895, "そこを父親代わりにやってる自分がいて")]
+        # カット頭＝新しいテロップの最初のフレーム（23808）は次の行を期待する
+        self.assertEqual(Q.expected_telop_at_frame(rows, 23808), "そこを父親代わりにやってる自分がいて")
+        # 直前のフレームは前の行
+        self.assertEqual(Q.expected_telop_at_frame(rows, 23807), "大阪に出る時の引っ越し代・家賃等")
+
+    def test_frame_in_gap_between_rows_expects_no_telop(self):
+        # subscan の行が途切れている区間（テロップ無し）は空文字列
+        rows = [(14645, 14730, "看板"), (14976, 15383, "仕事中にサウナ行く")]
+        self.assertEqual(Q.expected_telop_at_frame(rows, 14800), "")
+
+    def test_checkpoint_carries_source_frame_number(self):
+        timeline = make_timeline([
+            {"index": 0, "src_start_frame": 23808, "out_start_frame": 0, "n_frames": 87},
+        ])
+        points = Q.build_checkpoints(timeline)
+        self.assertEqual(find_point(points, 0, "head")["src_frame"], 23808)
+        self.assertEqual(find_point(points, 0, "tail")["src_frame"], 23808 + 86)
+
 
 class NormalizeTextTest(unittest.TestCase):
     def test_normalizes_confusable_symbols_and_fullwidth_and_whitespace(self):
